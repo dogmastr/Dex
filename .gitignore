@@ -1,0 +1,24 @@
+# Wally
+/Packages
+/ServerPackages
+/DevPackages
+
+# Artifacts
+/*.lock
+/*.rbxl
+/*.rbxlx
+/*.rbxm
+/*.rbxmx
+
+# Build output
+/out.lua
+
+# Internal notes, not part of the project
+/*-bugs.md
+/*-explorer-improvements.md
+/reports/
+/tests/
+
+# Misc
+.DS_Store
+/sourcemap.json

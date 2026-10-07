@@ -1,0 +1,19 @@
+name: Release
+
+# Pushing a version tag (v3.0, v3.1, ...) builds out.lua and publishes it as a release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 build.py
+      - run: gh release create "$GITHUB_REF_NAME" out.lua --title "OpenDex ${GITHUB_REF_NAME#v}" --generate-notes || gh release upload "$GITHUB_REF_NAME" out.lua --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
