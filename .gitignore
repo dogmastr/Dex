@@ -1,10 +1,4 @@
-# Wally
-/Packages
-/ServerPackages
-/DevPackages
-
-# Artifacts
-/*.lock
+# Places and models saved from a game (Save Instance writes these file types)
 /*.rbxl
 /*.rbxlx
 /*.rbxm

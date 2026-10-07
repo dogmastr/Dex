@@ -107,8 +107,8 @@ local function main()
 			refreshLoopRunning = true
 			task.spawn(function()
 				while model and ModelViewer.AutoRefresh do
-
-					ModelViewer.ViewModel(originalModel, true)
+					-- (a copy of the model each time: only while there is a window to see it in)
+					if window:IsContentVisible() then ModelViewer.ViewModel(originalModel, true) end
 					task.wait(1 / ModelViewer.RefreshRate)
 				end
 				refreshLoopRunning = false

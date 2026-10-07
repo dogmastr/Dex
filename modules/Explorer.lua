@@ -59,6 +59,7 @@ local function main()
 	local remote_watch,remote_callers = remoteHook.Watch,remoteHook.Callers -- Find Caller. watch: k = watched remote, v = its fire method. callers: k = remote, v = {[calling script or false] = {n = calls, t = last print}}
 	nodes = nodes or {}
 	local dirtyParents = {} -- nodes whose child lists contain deleted nodes, compacted by InitDelCleaner
+	local NAME_COLOR = Color3.fromRGB(220,220,220) -- an object's name in the tree (as the row template has it)
 
 	-- Puts node in its parent's child list: in sorted position when the parent is expanded and sorted, else at the end
 	local function insertChild(par,node)
@@ -407,9 +408,7 @@ local function main()
 			end
 		end
 
-		Explorer.MaxNameWidth = maxNameWidth
-		Explorer.MaxDepth = maxDepth
-		Explorer.ViewWidth = useNameWidth and Explorer.EntryIndent*maxDepth + maxNameWidth + 26 or Explorer.EntryIndent*maxDepth + 226
+		Explorer.ViewWidth =useNameWidth and Explorer.EntryIndent*maxDepth + maxNameWidth + 26 or Explorer.EntryIndent*maxDepth + 226
 		Explorer.UpdateView()
 	end
 
@@ -577,10 +576,6 @@ local function main()
 			end
 		end)
 
-		newEntry.MouseButton2Down:Connect(function()
-
-		end)
-
 		newEntry.Indent.Expand.InputBegan:Connect(function(input)
 			local node = tree[index + Explorer.Index]
 			if not node or (input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch) then return end
@@ -625,6 +620,8 @@ local function main()
 				entry.Position = UDim2.new(0,-scrollH.Index,0,entry.Position.Y.Offset)
 				entry.Size = UDim2.new(0,Explorer.ViewWidth,0,20)
 				entry.Indent.EntryName.Text = tostring(node.Obj)
+				-- a remote that is blocked from firing, or whose callers are being looked for, says so by its colour
+				entry.Indent.EntryName.TextColor3 = (remote_blocklist[obj] and Settings.Theme.Danger) or (remote_watch[obj] and Settings.Theme.Info) or NAME_COLOR
 				entry.Indent.Position = UDim2.new(0,depth,0,0)
 				entry.Indent.Size = UDim2.new(1,-depth,1,0)
 
@@ -772,15 +769,12 @@ local function main()
 				elseif Explorer.Index + visibleSpace - 1 <= relative then
 					scrollV.Index = relative - visibleSpace + 2
 				end
+				break
 			end
 		end
 
 		scrollV:Update() Explorer.Index = scrollV.Index
 		Explorer.Refresh()
-	end
-
-	Explorer.ViewObj = function(obj)
-		Explorer.ViewNode(nodes[obj])
 	end
 
 	Explorer.SelectObj = function(obj)
@@ -811,6 +805,130 @@ local function main()
 		if hasExpanded and not updateDebounce then
 			coroutine.wrap(Explorer.PerformUpdate)(true)
 		end
+	end
+
+	-- Selects these nodes and brings the first into view (with none, only redraws the tree)
+	local function selectNodes(list)
+		selection:SetTable(list)
+		if #list > 0 then
+			Explorer.ViewNode(list[1])
+		else
+			Explorer.Refresh()
+		end
+	end
+
+	-- Luau that makes copies of these objects and of everything in them: Instance.new for each, then the
+	-- properties that differ from a new object of its class, its attributes and tags, and the parents last.
+	-- Returns the code, how many objects it makes and how many it leaves out (what a script can't make,
+	-- and what is past the limit).
+	Explorer.ToCode = function(objs)
+		local LIMIT = 300
+		local list, varOf, used = {}, {}, {}
+		local leftOut = 0
+		-- names the code itself uses, which a variable must not hide
+		for word in ("game workspace script math"):gmatch("%S+") do
+			used[word] = true
+		end
+
+		local fresh = {} -- class name -> a new object of the class to compare with (false: a script can't make one)
+		local function freshOf(class)
+			if fresh[class] == nil then
+				local ok,inst = pcall(Instance.new,class)
+				fresh[class] = ok and inst or false
+			end
+			return fresh[class]
+		end
+
+		local function collect(obj)
+			if varOf[obj] then return end -- (selected, and inside something selected)
+			if #list >= LIMIT or not freshOf(obj.ClassName) then
+				local ok,descs = pcall(obj.GetDescendants,obj)
+				leftOut = leftOut + 1 + (ok and #descs or 0)
+				return
+			end
+			-- the variable is called after the object when its name is a plain word, else after its class
+			local base = tostring(obj.Name):match("^[%a_][%w_]*$") and obj.Name or obj.ClassName
+			base = base:sub(1,1):lower()..base:sub(2)
+			local name,n = base,1
+			while used[name] or Lib.LuaKeywords[name] do
+				n = n + 1
+				name = base..n
+			end
+			used[name] = true
+			varOf[obj] = name
+			list[#list+1] = obj
+			for _,child in ipairs(obj:GetChildren()) do collect(child) end
+		end
+		for _,obj in ipairs(objs) do collect(obj) end
+
+		local out = {}
+		for _,obj in ipairs(list) do
+			out[#out+1] = ('local %s = Instance.new("%s")'):format(varOf[obj],obj.ClassName)
+		end
+
+		local hasScript = false
+		for _,obj in ipairs(list) do
+			local var,base = varOf[obj],fresh[obj.ClassName]
+			local found = {}
+			local class = API.Classes[obj.ClassName]
+			while class do
+				for _,prop in ipairs(class.Properties) do
+					local tags,sec = prop.Tags,prop.Security
+					local open = type(sec) ~= "table" or (sec.Read == "None" and sec.Write == "None")
+					if open and prop.Name ~= "Parent" and not (tags.ReadOnly or tags.NotScriptable or tags.Deprecated or tags.Hidden) then
+						local ok,value = pcall(function() return obj[prop.Name] end)
+						local okDefault,default = pcall(function() return base[prop.Name] end)
+						if ok and okDefault and value ~= default then found[#found+1] = {prop.Name,value} end
+					end
+				end
+				class = class.Superclass
+			end
+			table.sort(found,function(a,b)
+				if (a[1] == "Name") ~= (b[1] == "Name") then return a[1] == "Name" end
+				return a[1] < b[1]
+			end)
+
+			if #found > 0 then out[#out+1] = "" end
+			for _,p in ipairs(found) do
+				-- an object that is being made too is meant by its variable, any other by its path
+				local code,exact = varOf[p[2]],true
+				if not code then code,exact = Lib.ToLua(p[2]) end
+				out[#out+1] = (exact and "" or "-- ")..("%s.%s = %s"):format(var,p[1],code)
+			end
+
+			local okAttrs,attrs = pcall(obj.GetAttributes,obj)
+			local names = {}
+			for name in pairs(okAttrs and attrs or {}) do names[#names+1] = name end
+			table.sort(names)
+			for _,name in ipairs(names) do
+				local code,exact = Lib.ToLua(attrs[name])
+				out[#out+1] = (exact and "" or "-- ")..('%s:SetAttribute("%s", %s)'):format(var,Lib.FormatLuaString(name),code)
+			end
+			local okTags,objTags = pcall(obj.GetTags,obj)
+			for _,tag in ipairs(okTags and objTags or {}) do
+				out[#out+1] = ('%s:AddTag("%s")'):format(var,Lib.FormatLuaString(tag))
+			end
+			if isa(obj,"LuaSourceContainer") then hasScript = true end
+		end
+
+		-- inside one another first, then into the game: nothing shows before it is whole
+		if #list > 0 then out[#out+1] = "" end
+		for _,obj in ipairs(list) do
+			local parentVar = varOf[obj.Parent]
+			if parentVar then out[#out+1] = ("%s.Parent = %s"):format(varOf[obj],parentVar) end
+		end
+		for _,obj in ipairs(list) do
+			if not varOf[obj.Parent] then
+				local code,exact = Lib.ToLua(obj.Parent)
+				out[#out+1] = (exact and "" or "-- ")..("%s.Parent = %s"):format(varOf[obj],code)
+			end
+		end
+		if hasScript then out[#out+1] = "-- (the code of the scripts is not part of this: View Script shows it)" end
+
+		for _,inst in pairs(fresh) do
+			if inst then pcall(inst.Destroy,inst) end
+		end
+		return table.concat(out,"\n"),#list,leftOut
 	end
 
 	-- Fills the right-click menu for the current selection. Kept apart from showing it so the command
@@ -865,10 +983,14 @@ local function main()
 		context:AddDivider()
 
 		if expanded == Explorer.SearchExpanded then context:AddRegistered("CLEAR_SEARCH_AND_JUMP_TO") end
-		if env.setclipboard then context:AddRegistered("COPY_PATH") end
+		if env.setclipboard then
+			context:AddRegistered("COPY_PATH")
+			context:AddRegistered("COPY_AS_CODE")
+		end
 		context:AddRegistered("INSERT_OBJECT")
 		context:AddRegistered("SAVE_INST")
 		context:AddRegistered("VIEW_CONNECTIONS", (env.getconnections == nil and "Your executor has no getconnections") or (#sList ~= 1 and "Select a single object"))
+		context:AddRegistered("FIND_IN_SCRIPTS", (#sList ~= 1 and "Select a single object") or (not env.isdecompile() and "Your executor has no decompiler"))
 		if env.setclipboard then context:AddRegistered("COPY_API_PAGE") end
 
 		context:QueueDivider()
@@ -895,15 +1017,16 @@ local function main()
 		
 		if presentClasses["RemoteEvent"] or presentClasses["RemoteFunction"] or presentClasses["UnreliableRemoteEvent"]
 			or presentClasses["BindableEvent"] or presentClasses["BindableFunction"] then
-			context:AddRegistered("BLOCK_REMOTE", env.hookmetamethod == nil and "Your executor has no hookmetamethod")
-			context:AddRegistered("UNBLOCK_REMOTE", env.hookmetamethod == nil and "Your executor has no hookmetamethod")
-
-			local watching,seen
+			-- Block for what is not blocked, Unblock for what is (a blocked remote's name is red in the tree)
+			local blocked,open,watching,seen
 			for i = 1,#sList do
 				local obj = sList[i].Obj
+				if remote_blocklist[obj] then blocked = true else open = true end
 				watching = watching or remote_watch[obj]
 				seen = seen or remote_callers[obj]
 			end
+			if open then context:AddRegistered("BLOCK_REMOTE", env.hookmetamethod == nil and "Your executor has no hookmetamethod") end
+			if blocked then context:AddRegistered("UNBLOCK_REMOTE") end
 			if presentClasses["RemoteEvent"] or presentClasses["RemoteFunction"] or presentClasses["UnreliableRemoteEvent"] then
 				context:AddRegistered("WHERE_USED", (#sList ~= 1 and "Select a single remote") or (not env.isdecompile() and "Your executor has no decompiler"))
 			end
@@ -922,7 +1045,6 @@ local function main()
 
 		if presentClasses["LuaSourceContainer"] then
 			context:AddRegistered("VIEW_SCRIPT", (not presentClasses.isViableDecompileScript and NOT_VIABLE) or (not env.isdecompile() and "Your executor has no decompiler"))
-			context:AddRegistered("DUMP_FUNCTIONS", (not presentClasses.isViableDecompileScript and NOT_VIABLE) or ((env.getupvalues == nil or env.getconstants == nil or env.getgc == nil) and "Your executor needs getgc, getupvalues and getconstants"))
 			context:AddRegistered("SAVE_SCRIPT", (not presentClasses.isViableDecompileScript and NOT_VIABLE) or (not env.isdecompile() and "Your executor has no decompiler") or (env.writefile == nil and "Your executor has no writefile"))
 			context:AddRegistered("SAVE_BYTECODE", (not presentClasses.isViableDecompileScript and NOT_VIABLE) or (env.getscriptbytecode == nil and "Your executor has no getscriptbytecode") or (env.writefile == nil and "Your executor has no writefile"))
 
@@ -948,17 +1070,30 @@ local function main()
 
 	-- The actions the right-click menu offers for what is selected, for the command palette.
 	Explorer.GetActions = function()
-		if #selection.List == 0 then return {} end
-		local context = Explorer.RightClickContext
-		Explorer.PopulateContext()
-
 		local list = {}
-		for _, item in ipairs(context.Items) do
-			-- Delete stays out of the palette: nothing there asks before it destroys the selection
-			if not item.Divider and item ~= context.Registered.DELETE and item ~= context.Registered.DELETE_CHILDREN then
-				list[#list+1] = {Name = item.Name, Category = "Explorer", Disabled = item.Disabled and (item.Reason or true), Run = function() item.OnClick(item.Name) end}
+		if #selection.List > 0 then
+			local context = Explorer.RightClickContext
+			Explorer.PopulateContext()
+
+			for _, item in ipairs(context.Items) do
+				-- Delete stays out of the palette: nothing there asks before it destroys the selection
+				if not item.Divider and item ~= context.Registered.DELETE and item ~= context.Registered.DELETE_CHILDREN then
+					list[#list+1] = {Name = item.Name, Category = "Explorer", Disabled = item.Disabled and (item.Reason or true), Run = function() item.OnClick(item.Name) end}
+				end
 			end
 		end
+
+		list[#list+1] = {Name = "Select blocked remotes", Category = "Explorer", Disabled = next(remote_blocklist) == nil and "No remote is blocked", Run = function()
+			local found = {}
+			for obj in pairs(remote_blocklist) do
+				local node = nodes[obj]
+				if node then
+					Explorer.MakeNodeVisible(node)
+					found[#found+1] = node
+				end
+			end
+			selectNodes(found)
+		end}
 		return list
 	end
 
@@ -1021,7 +1156,6 @@ local function main()
 		context:Register("PASTE",{Name = "Paste Into", IconMap = Explorer.MiscIcons, Icon = "Paste", DisabledIcon = "Paste_Disabled", OnClick = function()
 			local sList = selection.List
 			local newSelection = {}
-			local count = 1
 			for i = 1,#sList do
 				local node = sList[i]
 				local inst = node.Obj
@@ -1030,22 +1164,16 @@ local function main()
 					local cloned = clipboard[c]:Clone()
 					if cloned then
 						cloned.Parent = inst
-						local clonedNode = nodeNow(cloned)
-						if clonedNode then newSelection[count] = clonedNode count = count + 1 end
+						newSelection[#newSelection+1] = nodeNow(cloned)
 					end
 				end
 			end
-			selection:SetTable(newSelection)
-
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("DUPLICATE",{Name = "Duplicate", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", OnClick = function()
 			local sList = selection.List
 			local newSelection = {}
-			local count = 1
 			for i = 1,#sList do
 				local node = sList[i]
 				local inst = node.Obj
@@ -1054,15 +1182,10 @@ local function main()
 				local cloned = cloneAny(inst)
 				if cloned then
 					cloned.Parent = instPar
-					local clonedNode = nodeNow(cloned)
-					if clonedNode then newSelection[count] = clonedNode count = count + 1 end
+					newSelection[#newSelection+1] = nodeNow(cloned)
 				end
 			end
-
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("DELETE",{Name = "Delete", IconMap = Explorer.MiscIcons, Icon = "Delete", DisabledIcon = "Delete_Disabled", OnClick = function()
@@ -1134,15 +1257,11 @@ local function main()
 				end
 			end
 
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("SELECT_CHILDREN",{Name = "Select Children", IconMap = Explorer.MiscIcons, Icon = "SelectChildren", DisabledIcon = "SelectChildren_Disabled", OnClick = function()
 			local newSelection = {}
-			local count = 1
 			local sList = selection.List
 
 			for i = 1,#sList do
@@ -1150,39 +1269,23 @@ local function main()
 				for ind = 1,#node do
 					local cNode = node[ind]
 					if ind == 1 then Explorer.MakeNodeVisible(cNode) end
-
-					newSelection[count] = cNode
-					count = count + 1
+					newSelection[#newSelection+1] = cNode
 				end
 			end
 
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			else
-				Explorer.Refresh()
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("JUMP_TO_PARENT",{Name = "Jump to Parent", IconMap = Explorer.MiscIcons, Icon = "JumpToParent", OnClick = function()
 			local newSelection = {}
-			local count = 1
 			local sList = selection.List
 
 			for i = 1,#sList do
 				local node = sList[i]
-				if node.Parent then
-					newSelection[count] = node.Parent
-					count = count + 1
-				end
+				if node.Parent then newSelection[#newSelection+1] = node.Parent end
 			end
 
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			else
-				Explorer.Refresh()
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("TELEPORT_TO",{Name = "Teleport To", IconMap = Explorer.MiscIcons, Icon = "TeleportTo", OnClick = function()
@@ -1258,69 +1361,33 @@ local function main()
 		end})
 
 		context:Register("STOP_ANIMATION",{Name = "Stop Animation", IconMap = Explorer.MiscIcons, Icon = "Pause", OnClick = function()
-			local sList = selection.List
-
-			local Humanoid = plr.Character and plr.Character:FindFirstChild("Humanoid")
-			if not Humanoid then return end
-
-			for i = 1, #sList do
-				local node = sList[i]
-				local Obj = node.Obj
-
-				if Obj:IsA("Animation") then
-					if OldAnimation then OldAnimation:Stop() end
-					break
-				end
-			end
+			if OldAnimation then OldAnimation:Stop() end
 		end})
 
-		context:Register("EXPAND_ALL",{Name = "Expand All", OnClick = function()
-			local sList = selection.List
-
-			local function expand(node)
-				expanded[node] = true
+		-- Opens (true) or closes (nil) the selected objects and everything in them
+		local function expandSelection(value)
+			local function set(node)
+				expanded[node] = value
 				for i = 1,#node do
 					if #node[i] > 0 then
-						expand(node[i])
+						set(node[i])
 					end
 				end
 			end
 
-			for i = 1,#sList do
-				expand(sList[i])
-			end
-
-			Explorer.ForceUpdate()
-		end})
-
-		context:Register("COLLAPSE_ALL",{Name = "Collapse All", OnClick = function()
 			local sList = selection.List
-
-			local function expand(node)
-				expanded[node] = nil
-				for i = 1,#node do
-					if #node[i] > 0 then
-						expand(node[i])
-					end
-				end
-			end
-
 			for i = 1,#sList do
-				expand(sList[i])
+				set(sList[i])
 			end
 
 			Explorer.ForceUpdate()
-		end})
+		end
+
+		context:Register("EXPAND_ALL",{Name = "Expand All", OnClick = function() expandSelection(true) end})
+		context:Register("COLLAPSE_ALL",{Name = "Collapse All", OnClick = function() expandSelection(nil) end})
 
 		context:Register("CLEAR_SEARCH_AND_JUMP_TO",{Name = "Clear Search and Jump to", OnClick = function()
-			local newSelection = {}
-			local count = 1
-			local sList = selection.List
-
-			for i = 1,#sList do
-				newSelection[count] = sList[i]
-				count = count + 1
-			end
+			local newSelection = table.clone(selection.List)
 
 			selection:SetTable(newSelection)
 			Explorer.ClearSearch()
@@ -1329,25 +1396,15 @@ local function main()
 			end
 		end})
 
-		-- this code is very bad but im lazy and it works so cope
-		local clth = function(str)
-			if str:sub(1, 28) == "game:GetService(\"Workspace\")" then str = str:gsub("game:GetService%(\"Workspace\"%)", "workspace", 1) end
-			local prefix = "game:GetService(\"Players\")." .. plr.Name
-			if str:sub(1, #prefix) == prefix and str:sub(#prefix + 1, #prefix + 1):match("^[%.%[:]?$") then
-				str = "game:GetService(\"Players\").LocalPlayer" .. str:sub(#prefix + 1)
-			end
-			return str
-		end
-
 		context:Register("COPY_PATH",{Name = "Copy Path", IconMap = Explorer.LegacyClassIcons, Icon = 50, OnClick = function()
 			local sList = selection.List
 			if #sList == 1 then
-				env.setclipboard(clth(Explorer.GetInstancePath(sList[1].Obj)))
+				env.setclipboard(Explorer.GetInstancePath(sList[1].Obj))
 			elseif #sList > 1 then
 				local resList = {"{"}
 				local count = 2
 				for i = 1,#sList do
-					local path = "\t"..clth(Explorer.GetInstancePath(sList[i].Obj))..","
+					local path = "\t"..Explorer.GetInstancePath(sList[i].Obj)..","
 					if #path > 0 then
 						resList[count] = path
 						count = count+1
@@ -1356,6 +1413,26 @@ local function main()
 				resList[count] = "}"
 				env.setclipboard(table.concat(resList,"\n"))
 			end
+		end})
+
+		context:Register("COPY_AS_CODE",{Name = "Copy as Code", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", OnClick = function()
+			local objs = {}
+			for _,node in ipairs(selection.List) do objs[#objs+1] = node.Obj end
+
+			local ok,code,made,leftOut = pcall(Explorer.ToCode,objs)
+			if not ok then
+				Main.Notify("Couldn't write the code: "..tostring(code),"error")
+			elseif made == 0 then
+				Main.Notify("A script can't make what is selected (a service, a player and the like)","warn")
+			else
+				env.setclipboard(code)
+				Main.Notify(("Copied the code that makes %d object%s%s"):format(made,made == 1 and "" or "s",leftOut > 0 and (" ("..leftOut.." left out)") or ""),"success")
+			end
+		end})
+
+		context:Register("FIND_IN_SCRIPTS",{Name = "Find in Scripts", IconMap = Explorer.MiscIcons, Icon = "ViewScript", DisabledIcon = "Empty", OnClick = function()
+			local node = selection.List[1]
+			if node then ScriptViewer.FindInScripts(node.Obj) end
 		end})
 
 		context:Register("INSERT_OBJECT",{Name = "Insert Object", IconMap = Explorer.MiscIcons, Icon = "InsertObject", OnClick = function()
@@ -1448,25 +1525,20 @@ local function main()
 				local obj = list.Obj
 				if not remote_blocklist[obj] then
 					remote_blocklist[obj] = ClassFire[obj.ClassName]
-					if Settings.RemoteBlockWriteAttribute then
-						obj:SetAttribute("IsBlocked", true)
-					end
 				end
 			end
+			Explorer.Refresh() -- its name turns red
 		end})
-		
+
 		context:Register("UNBLOCK_REMOTE",{Name = "Unblock", IconMap = Explorer.MiscIcons, Icon = "Play", DisabledIcon = "Empty", OnClick = function()
 			local sList = selection.List
 			for i, list in sList do
 				local obj = list.Obj
 				if remote_blocklist[obj] then
 					remote_blocklist[obj] = nil
-					if Settings.RemoteBlockWriteAttribute then
-						list.Obj:SetAttribute("IsBlocked", false)
-					end
-					--print("unblocking ",functionToHook)
 				end
 			end
+			Explorer.Refresh()
 		end})
 
 		context:Register("WHERE_USED",{Name = "Where Is This Used?", IconMap = Explorer.MiscIcons, Icon = "CallRemote", DisabledIcon = "Empty", OnClick = function()
@@ -1484,12 +1556,14 @@ local function main()
 					remote_callers[obj] = remote_callers[obj] or {}
 				end
 			end
+			Explorer.Refresh() -- its name turns blue
 		end})
 
 		context:Register("STOP_FIND_CALLER",{Name = "Stop Finding Caller", IconMap = Explorer.MiscIcons, Icon = "Pause", DisabledIcon = "Empty", OnClick = function()
 			for _, node in ipairs(selection.List) do
 				remote_watch[node.Obj] = nil
 			end
+			Explorer.Refresh()
 		end})
 
 		context:Register("SELECT_CALLERS",{Name = "Select Callers", IconMap = Explorer.MiscIcons, Icon = "SelectChildren", DisabledIcon = "Empty", OnClick = function()
@@ -1509,8 +1583,7 @@ local function main()
 				print("[FindCaller] no calling scripts recorded for the selection yet")
 				return
 			end
-			selection:SetTable(newSelection)
-			Explorer.ViewNode(newSelection[1])
+			selectNodes(newSelection)
 		end})
 
 		context:Register("COPY_API_PAGE",{Name = "Copy Roblox API Page URL", IconMap = Explorer.MiscIcons, Icon = "Reference", OnClick = function()
@@ -1546,10 +1619,6 @@ local function main()
 			local scr = selection.List[1] and selection.List[1].Obj
 			if scr then ScriptViewer.ViewScript(scr) end
 		end})
-		context:Register("DUMP_FUNCTIONS",{Name = "Dump Functions", IconMap = Explorer.MiscIcons, Icon = "SelectChildren", DisabledIcon = "Empty", OnClick = function()
-			local scr = selection.List[1] and selection.List[1].Obj
-			if scr then ScriptViewer.DumpFunctions(scr) end
-		end})
 
 		context:Register("FIRE_TOUCHTRANSMITTER",{Name = "Fire TouchTransmitter", OnClick = function()
 			local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
@@ -1576,7 +1645,6 @@ local function main()
 					local success, source = pcall(env.decompile, v.Obj)
 					if not success or not source then source = ("-- DEX - %s failed to decompile %s"):format(tostring(Main.Executor), v.Obj.ClassName) end
 					local fileName = ("%s_%s_%i_Source.txt"):format(env.parsefile(v.Obj.Name), v.Obj.ClassName, game.PlaceId)
-					--env.writefile(fileName, source)
 					Lib.SaveAsPrompt(fileName, source)
 					
 					task.wait(0.2)
@@ -1590,7 +1658,6 @@ local function main()
 					local success, bytecode = pcall(env.getscriptbytecode, v.Obj)
 					if success and type(bytecode) == "string" then
 						local fileName = ("%s_%s_%i_Bytecode.txt"):format(env.parsefile(v.Obj.Name), v.Obj.ClassName, game.PlaceId)
-						--env.writefile(fileName, bytecode)
 						Lib.SaveAsPrompt(fileName, bytecode)
 						task.wait(0.2)
 					end
@@ -1600,28 +1667,19 @@ local function main()
 
 		context:Register("SELECT_CHARACTER",{Name = "Select Character", IconMap = Explorer.LegacyClassIcons, Icon = 9, OnClick = function()
 			local newSelection = {}
-			local count = 1
 			local sList = selection.List
 
 			for i = 1,#sList do
 				local node = sList[i]
 				if isa(node.Obj,"Player") and nodes[node.Obj.Character] then
-					newSelection[count] = nodes[node.Obj.Character]
-					count = count + 1
+					newSelection[#newSelection+1] = nodes[node.Obj.Character]
 				end
 			end
 
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			else
-				Explorer.Refresh()
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("VIEW_PLAYER",{Name = "View Player", IconMap = Explorer.LegacyClassIcons, Icon = 5, OnClick = function()
-			local newSelection = {}
-			local count = 1
 			local sList = selection.List
 
 			for i = 1,#sList do
@@ -1640,7 +1698,6 @@ local function main()
 
 		context:Register("SELECT_ALL_CHARACTERS",{Name = "Select All Characters", IconMap = Explorer.LegacyClassIcons, Icon = 2, OnClick = function()
 			local newSelection = {}
-			local sList = selection.List
 
 			for i,v in next, service.Players:GetPlayers() do
 				if v.Character and nodes[v.Character] then
@@ -1649,12 +1706,7 @@ local function main()
 				end
 			end
 
-			selection:SetTable(newSelection)
-			if #newSelection > 0 then
-				Explorer.ViewNode(newSelection[1])
-			else
-				Explorer.Refresh()
-			end
+			selectNodes(newSelection)
 		end})
 
 		context:Register("REFRESH_NIL",{Name = "Refresh Nil Instances", OnClick = function()
@@ -1671,10 +1723,9 @@ local function main()
 	Explorer.HideNilInstances = function()
 		table.clear(nilMap)
 
-		local disconnectCon = Instance.new("Folder").ChildAdded:Connect(function() end).Disconnect
 		for i,v in next,nilCons do
-			disconnectCon(v[1])
-			disconnectCon(v[2])
+			v[1]:Disconnect()
+			v[2]:Disconnect()
 		end
 		table.clear(nilCons)
 
@@ -1722,16 +1773,10 @@ local function main()
 		local curObj = obj
 		local ts = tostring
 		local match = string.match
-		local gsub = string.gsub
 		local tableFind = table.find
 		local useGetCh = Settings.Explorer.CopyPathUseGetChildren
 		local formatLuaString = Lib.FormatLuaString
-		local luaKeywords = {
-			["and"]=true,["break"]=true,["do"]=true,["else"]=true,["elseif"]=true,["end"]=true,
-			["false"]=true,["for"]=true,["function"]=true,["goto"]=true,["if"]=true,["in"]=true,
-			["local"]=true,["nil"]=true,["not"]=true,["or"]=true,["repeat"]=true,["return"]=true,
-			["then"]=true,["true"]=true,["until"]=true,["while"]=true
-		}
+		local luaKeywords = Lib.LuaKeywords
 
 		while curObj do
 			if curObj == game or curObj == rawGame then
@@ -1768,6 +1813,14 @@ local function main()
 			curObj = parObj
 		end
 
+		-- written the way a script would: workspace, and LocalPlayer for your own player
+		if path:sub(1,28) == 'game:GetService("Workspace")' then
+			path = "workspace"..path:sub(29)
+		end
+		local own = 'game:GetService("Players").'..plr.Name
+		if path:sub(1,#own) == own and path:sub(#own+1,#own+1):match("^[%.%[:]?$") then
+			path = 'game:GetService("Players").LocalPlayer'..path:sub(#own+1)
+		end
 		return path
 	end
 
@@ -1841,22 +1894,14 @@ local function main()
 		local lastCategory = ""
 		for i = 1,#classes do
 			local class = classes[i][1]
-			local rmdEntry = RMD.Classes[class.Name]
-			local iconInd = rmdEntry and tonumber(rmdEntry.ExplorerImageIndex) or 0
 			local category = classes[i][2]
 
 			if lastCategory ~= category then
 				context:AddDivider(category)
 				lastCategory = category
 			end
-			
-			local icon
-			if iconData then
-				icon = iconData.Icons[class.Name] or iconData.Icons.Placeholder
-			else
-				icon = iconInd
-			end
-			context:Add({Name = class.Name, IconMap = Explorer.ClassIcons, Icon = icon, OnClick = onClick})
+
+			context:Add({Name = class.Name, IconMap = Explorer.ClassIcons, Icon = iconData.Icons[class.Name] or iconData.Icons.Placeholder, OnClick = onClick})
 		end
 
 		Explorer.InsertObjectContext = context
@@ -1894,13 +1939,13 @@ local function main()
 			["remotes"] = function(argString)
 				return {
 					Headers = {"local isa = game.IsA"},
-					Predicate = "isa(obj,'RemoteEvent') or isa(obj,'RemoteFunction') or isa(obj,'UnreliableRemoteEvent')"
+					Predicate = "(isa(obj,'RemoteEvent') or isa(obj,'RemoteFunction') or isa(obj,'UnreliableRemoteEvent'))"
 				}
 			end,
 			["bindables"] = function(argString)
 				return {
 					Headers = {"local isa = game.IsA"},
-					Predicate = "isa(obj,'BindableEvent') or isa(obj,'BindableFunction')"
+					Predicate = "(isa(obj,'BindableEvent') or isa(obj,'BindableFunction'))"
 				}
 			end,
 			["rad"] = function(argString)
@@ -1958,8 +2003,6 @@ local function main()
 		local headers = {}
 		local objectDefs = {}
 		local setups = {}
-		local find = string.find
-		local sub = string.sub
 		local lower = string.lower
 		local match = string.match
 		local ops = {
@@ -1968,7 +2011,6 @@ local function main()
 			["||"] = " or ",
 			["&&"] = " and "
 		}
-		local filterCount = 0
 		local compFilters = Explorer.SearchFilters.Comparison
 		local specFilters = Explorer.SearchFilters.Specific
 		local init = 1
@@ -2008,17 +2050,16 @@ local function main()
 			local count = #found+1
 			local init = 1
 			local sz = #pattern
-			local x,y,extra = find(str,pattern,init,true)
+			local x,y = find(str,pattern,init,true)
 			while x do
 				found[count] = x
 				foundData[x] = {sz,pattern}
 
 				count = count+1
 				init = y+1
-				x,y,extra = find(str,pattern,init,true)
+				x,y = find(str,pattern,init,true)
 			end
 		end
-		local start = tick()
 		findAll(formatQuery,'&&')
 		findAll(formatQuery,"||")
 		findAll(formatQuery,"(")
@@ -2161,47 +2202,8 @@ return search]==]
 		Explorer.SearchCount = 0 -- the search functions count their matches here
 
 		if #query > 0 then
-			local expandTable = Explorer.SearchExpanded
 			local specFilters
-
-			local lower = string.lower
-			local find = string.find
-			local tostring = tostring
-
-			local lowerQuery = lower(query)
-
-			local function defaultSearch(root)
-				local expandedpar = false
-				for i = 1,#root do
-					local node = root[i]
-					local obj = node.Obj
-
-					if find(lower(tostring(obj)),lowerQuery,1,true) then
-						expandTable[node] = 0
-						searchResults[node] = true
-						Explorer.SearchCount = Explorer.SearchCount + 1
-						if not expandedpar then
-							local parnode = node.Parent
-							while parnode and (not searchResults[parnode] or expandTable[parnode] == 0) do
-								expanded[parnode] = true
-								searchResults[parnode] = true
-								parnode = parnode.Parent
-							end
-							expandedpar = true
-						end
-					end
-
-					if #node > 0 then defaultSearch(node) end
-				end
-			end
-
-			if Main.Elevated then
-				local start = tick()
-				searchFunc,specFilters = Explorer.BuildSearchFunc(query)
-				--print("BUILD SEARCH",tick()-start)
-			else
-				searchFunc = defaultSearch
-			end
+			searchFunc,specFilters = Explorer.BuildSearchFunc(query)
 
 			if specFilters then
 				table.clear(specResults)
@@ -2219,10 +2221,8 @@ return search]==]
 			end
 
 			if searchFunc then
-				local start = tick()
 				searchFunc(nodes[game])
 				searchFunc(nilNode)
-				--warn(tick()-start)
 			end
 		end
 
@@ -2251,7 +2251,7 @@ return search]==]
 		local searchFrame = Explorer.GuiElems.ToolBar.SearchFrame
 		local searchBox = searchFrame.SearchBox
 		Explorer.GuiElems.SearchBar = searchBox
-		searchBox.PlaceholderText = Main.Elevated and "Search by name, or /isa Part, /remotes" or "Search by name"
+		searchBox.PlaceholderText = "Search by name, or /isa Part, /remotes"
 
 		local view = Lib.ViewportTextBox.convert(searchBox).View
 
@@ -2309,8 +2309,6 @@ return search]==]
 			if not ind then return end
 			local node = tree[ind + Explorer.Index]
 			if not node then return end
-
-			local entry = listEntries[ind]
 
 			if button == 1 then
 				if combo == 2 then
@@ -2520,22 +2518,18 @@ return search]==]
 
 	Explorer.Init = function()
 		Explorer.LegacyClassIcons = Lib.IconMap.newLinear("rbxasset://textures/ClassImages.PNG", 16,16)
-		if Settings.ClassIcon ~= nil and Settings.ClassIcon ~= "Old" then
-			iconData = Lib.IconMap.getIconDataFromName(Settings.ClassIcon)
-			
-			Explorer.ClassIcons = Lib.IconMap.new("rbxassetid://"..tostring(iconData.MapId), iconData.IconSize * iconData.Witdh, iconData.IconSize * iconData.Height,iconData.IconSize,iconData.IconSize)
-			-- move every value dict 1 behind because SetDict starts at 0 not 1 lol
-			local fixed = {}
-			for i,v in pairs(iconData.Icons) do
-				fixed[i] = v - 1
-			end
-			
-			iconData.Icons = fixed
-			Explorer.ClassIcons:SetDict(fixed)
-		else
-			Explorer.ClassIcons = Lib.IconMap.newLinear("rbxasset://textures/ClassImages.PNG", 16,16)
+		iconData = Lib.IconMap.getIconDataFromName(Settings.ClassIcon)
+
+		Explorer.ClassIcons = Lib.IconMap.new("rbxassetid://"..tostring(iconData.MapId), iconData.IconSize * iconData.Witdh, iconData.IconSize * iconData.Height,iconData.IconSize,iconData.IconSize)
+		-- move every value dict 1 behind because SetDict starts at 0 not 1 lol
+		local fixed = {}
+		for i,v in pairs(iconData.Icons) do
+			fixed[i] = v - 1
 		end
-		
+
+		iconData.Icons = fixed
+		Explorer.ClassIcons:SetDict(fixed)
+
 		Explorer.MiscIcons = Main.MiscIcons
 
 		clipboard = {}
@@ -2564,8 +2558,6 @@ return search]==]
 			{6,"UIStroke",{Thickness=1.4,Parent={3},Color=Color3.fromRGB(42,42,42)}},
 			{7,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Reset",Parent={3},Position=UDim2.new(1,-17,0,1),Size=UDim2.new(0,16,0,16),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
 			{8,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5034718129",ImageColor3=Color3.new(0.39215686917305,0.39215686917305,0.39215686917305),Parent={7},Size=UDim2.new(0,16,0,16),}},
-			{9,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Refresh",Parent={2},Position=UDim2.new(1,-20,0,1),Size=UDim2.new(0,18,0,18),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,Visible=false,}},
-			{10,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5642310344",Parent={9},Position=UDim2.new(0,3,0,3),Size=UDim2.new(0,12,0,12),}},
 			{11,"Frame",{BackgroundColor3=Color3.new(0.15686275064945,0.15686275064945,0.15686275064945),BorderSizePixel=0,Name="ScrollCorner",Parent={1},Position=UDim2.new(1,-16,1,-16),Size=UDim2.new(0,16,0,16),Visible=false,}},
 			{12,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,23),Size=UDim2.new(1,0,1,-23),}}
 		})

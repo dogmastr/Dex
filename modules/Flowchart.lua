@@ -95,7 +95,7 @@ local function main()
 	local edgeLayer, nodeLayer, labelLayer
 	local titleButton, infoLabel, emptyLabel
 	local modeButtons, onMode = {}, nil
-	local searchBox, searchCount, legendButton, legend
+	local searchBox, searchCount, legend
 	local active = function() return true end
 	local graph, opts = nil, {}
 	local nodeFrames, selectedId = {}, nil
@@ -534,7 +534,7 @@ local function main()
 			Size = UDim2.new(0,64,0,18),
 			Parent = pane,
 		})
-		legendButton = toolButton("Legend",UDim2.new(1,-62,0,23),UDim2.new(0,60,0,18),function()
+		toolButton("Legend",UDim2.new(1,-62,0,23),UDim2.new(0,60,0,18),function()
 			if not legend then buildLegend() end
 			legend.Visible = not legend.Visible
 		end,"What the colours of the boxes, arrows and buttons mean")

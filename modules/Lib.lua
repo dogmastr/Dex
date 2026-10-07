@@ -6,7 +6,7 @@
 
 -- Common Locals
 local Main,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer -- Major Apps
+local Explorer, ScriptViewer -- Major Apps
 local API,RMD,env,service,plr,create,createSimple -- Main Locals
 
 local function initDeps(data)
@@ -25,7 +25,6 @@ end
 
 local function initAfterMain()
 	Explorer = Apps.Explorer
-	Properties = Apps.Properties
 	ScriptViewer = Apps.ScriptViewer
 end
 
@@ -82,6 +81,12 @@ local function main()
 			return gsub(str,"[\"\\\0-\31\127-\255]",cleanTable)
 		end
 	end)()
+
+	-- Words that can't be written as a name: after a dot in a path, as a key in a table constructor
+	Lib.LuaKeywords = {}
+	for word in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%a+") do
+		Lib.LuaKeywords[word] = true
+	end
 
 	Lib.CheckMouseInGui = function(gui)
 		if gui == nil then return false end
@@ -332,6 +337,196 @@ local function main()
 		return string.format("%d, %d, %d",round(col.r*255),round(col.g*255),round(col.b*255))
 	end
 
+	-- Lib.ToLua(value) writes a value as Luau code: a table as a constructor, a Roblox value as the call that
+	-- makes it, an instance as its path. What can't be written (a function, a thread, an instance that is not
+	-- in the game) becomes nil with a comment saying what it was. Returns the code, and false as a second
+	-- value when something in it was left out like that.
+	Lib.ToLua = (function()
+		local write
+		local MAX_DEPTH, MAX_FIELDS = 8, 500
+
+		-- The shortest text that reads back as the same number. single: the number came out of a Roblox
+		-- value, which keeps 32-bit floats (0.1 there is 0.10000000149, and is written 0.1).
+		local function num(n, single)
+			if n ~= n then return "0/0" end
+			if n == math.huge then return "math.huge" elseif n == -math.huge then return "-math.huge" end
+			if n == math.floor(n) and math.abs(n) < 1e15 then return string.format("%d", n) end
+			for digits = single and 6 or 15, single and 9 or 17 do
+				local text = string.format("%."..digits.."g", n)
+				local back = tonumber(text)
+				if single and back then back = string.unpack("f", string.pack("f", back)) end
+				if back == n then return text end
+			end
+			return string.format("%.17g", n)
+		end
+
+		local function left(what)
+			return "nil --[["..tostring(what):gsub("%]%]", "] ]").."]]", false
+		end
+
+		local function call(name, ...)
+			local parts, exact = {...}, true
+			for i,v in ipairs(parts) do
+				if type(v) ~= "string" then
+					local ok
+					parts[i], ok = write(v)
+					exact = exact and ok
+				end
+			end
+			return name.."("..table.concat(parts, ", ")..")", exact
+		end
+
+		local function keypoints(name, list, each)
+			local parts, exact = {}, true
+			for i,kp in ipairs(list) do
+				local ok
+				parts[i], ok = each(kp)
+				exact = exact and ok
+			end
+			return name..".new({"..table.concat(parts, ", ").."})", exact
+		end
+
+		local writers = {
+			["nil"] = function() return "nil", true end,
+			boolean = function(v) return tostring(v), true end,
+			number = function(v) return num(v), true end,
+			string = function(v) return '"'..Lib.FormatLuaString(v)..'"', true end,
+			Vector2 = function(v) return call("Vector2.new", num(v.X, true), num(v.Y, true)) end,
+			Vector3 = function(v) return call("Vector3.new", num(v.X, true), num(v.Y, true), num(v.Z, true)) end,
+			Vector2int16 = function(v) return call("Vector2int16.new", num(v.X), num(v.Y)) end,
+			Vector3int16 = function(v) return call("Vector3int16.new", num(v.X), num(v.Y), num(v.Z)) end,
+			CFrame = function(v)
+				local parts = {v:GetComponents()}
+				local turned = false -- a CFrame that is only a position is written the short way
+				for i = 4,12 do
+					if parts[i] ~= ((i == 4 or i == 8 or i == 12) and 1 or 0) then turned = true end
+				end
+				for i,p in ipairs(parts) do parts[i] = num(p, true) end
+				return "CFrame.new("..table.concat(parts, ", ", 1, turned and 12 or 3)..")", true
+			end,
+			Color3 = function(v)
+				local r,g,b = v.R*255, v.G*255, v.B*255
+				if math.abs(r - math.round(r)) < 1e-3 and math.abs(g - math.round(g)) < 1e-3 and math.abs(b - math.round(b)) < 1e-3 then
+					return ("Color3.fromRGB(%d, %d, %d)"):format(math.round(r), math.round(g), math.round(b)), true
+				end
+				return call("Color3.new", num(v.R, true), num(v.G, true), num(v.B, true))
+			end,
+			BrickColor = function(v) return call("BrickColor.new", '"'..Lib.FormatLuaString(v.Name)..'"') end,
+			UDim = function(v) return call("UDim.new", num(v.Scale, true), num(v.Offset)) end,
+			UDim2 = function(v) return call("UDim2.new", num(v.X.Scale, true), num(v.X.Offset), num(v.Y.Scale, true), num(v.Y.Offset)) end,
+			EnumItem = function(v) return tostring(v), true end,
+			Enum = function(v) return "Enum."..tostring(v):gsub("^Enum%.", ""), true end,
+			Enums = function() return "Enum", true end,
+			NumberRange = function(v) return call("NumberRange.new", num(v.Min, true), num(v.Max, true)) end,
+			NumberSequenceKeypoint = function(v) return call("NumberSequenceKeypoint.new", num(v.Time, true), num(v.Value, true), num(v.Envelope, true)) end,
+			ColorSequenceKeypoint = function(v) return call("ColorSequenceKeypoint.new", num(v.Time, true), v.Value) end,
+			NumberSequence = function(v) return keypoints("NumberSequence", v.Keypoints, write) end,
+			ColorSequence = function(v) return keypoints("ColorSequence", v.Keypoints, write) end,
+			Rect = function(v) return call("Rect.new", num(v.Min.X, true), num(v.Min.Y, true), num(v.Max.X, true), num(v.Max.Y, true)) end,
+			Ray = function(v) return call("Ray.new", v.Origin, v.Direction) end,
+			Region3 = function(v) return call("Region3.new", v.CFrame.Position - v.Size/2, v.CFrame.Position + v.Size/2) end,
+			TweenInfo = function(v) return call("TweenInfo.new", num(v.Time, true), v.EasingStyle, v.EasingDirection, num(v.RepeatCount), v.Reverses, num(v.DelayTime, true)) end,
+			PhysicalProperties = function(v) return call("PhysicalProperties.new", num(v.Density, true), num(v.Friction, true), num(v.Elasticity, true), num(v.FrictionWeight, true), num(v.ElasticityWeight, true)) end,
+			Font = function(v) return call("Font.new", '"'..Lib.FormatLuaString(v.Family)..'"', v.Weight, v.Style) end,
+			DateTime = function(v) return call("DateTime.fromUnixTimestampMillis", num(v.UnixTimestampMillis)) end,
+			buffer = function(v) return call("buffer.fromstring", '"'..Lib.FormatLuaString(buffer.tostring(v))..'"') end,
+			Faces = function(v)
+				local parts = {}
+				for _,face in ipairs({"Top", "Bottom", "Left", "Right", "Back", "Front"}) do
+					if v[face] then parts[#parts+1] = "Enum.NormalId."..face end
+				end
+				return "Faces.new("..table.concat(parts, ", ")..")", true
+			end,
+			Axes = function(v)
+				local parts = {}
+				for _,axis in ipairs({"X", "Y", "Z"}) do
+					if v[axis] then parts[#parts+1] = "Enum.Axis."..axis end
+				end
+				return "Axes.new("..table.concat(parts, ", ")..")", true
+			end,
+			Instance = function(v)
+				local ok, path = pcall(function()
+					if v ~= game and not v:IsDescendantOf(game) then return nil end
+					return Explorer.GetInstancePath(v)
+				end)
+				if not ok or not path then
+					local okName, name = pcall(function() return v.ClassName..' "'..v.Name..'"' end)
+					return left((okName and name or "an instance")..": not in the game")
+				end
+				return path, true
+			end,
+		}
+
+		writers.table = function(t, indent, seen, depth)
+			if seen[t] then return left("a table that contains itself") end
+			if depth > MAX_DEPTH then return left("a table (deeper levels are left out)") end
+			if next(t) == nil then return "{}", true end
+			seen[t] = true
+
+			local inner = indent.."\t"
+			local parts, exact, plain = {}, true, true
+			local n = #t
+			for i = 1,math.min(n, MAX_FIELDS) do
+				local text, ok = write(t[i], inner, seen, depth + 1)
+				parts[#parts+1], exact = text, exact and ok
+				if type(t[i]) == "table" or not ok then plain = false end
+			end
+
+			local keys = {}
+			for k in pairs(t) do
+				if not (type(k) == "number" and k >= 1 and k <= n and k == math.floor(k)) then keys[#keys+1] = k end
+			end
+			-- names first and in order, so the same table is always written the same way
+			table.sort(keys, function(a, b)
+				local ta, tb = type(a), type(b)
+				if ta ~= tb then return ta == "string" or (tb ~= "string" and ta < tb) end
+				if ta == "string" or ta == "number" then return a < b end
+				return tostring(a) < tostring(b)
+			end)
+			for i,k in ipairs(keys) do
+				if #parts >= MAX_FIELDS then break end
+				local key, keyOk
+				if type(k) == "string" and k:match("^[%a_][%w_]*$") and not Lib.LuaKeywords[k] then
+					key, keyOk = k, true
+				else
+					key, keyOk = write(k, inner, seen, depth + 1)
+					key = "["..key.."]"
+				end
+				local text, ok = write(t[k], inner, seen, depth + 1)
+				parts[#parts+1], exact = key.." = "..text, exact and ok and keyOk
+			end
+			seen[t] = nil -- (the same table twice side by side is fine: only a table inside itself is not)
+
+			local total = n + #keys
+			if total > MAX_FIELDS then
+				parts[#parts+1] = "nil --[["..(total - MAX_FIELDS).." more fields are left out]]"
+				exact, plain = false, false
+			end
+			-- a short list of plain values stays on one line
+			if plain and #keys == 0 then
+				local line = "{"..table.concat(parts, ", ").."}"
+				if #line <= 100 then return line, exact end
+			end
+			return "{\n"..inner..table.concat(parts, ",\n"..inner)..",\n"..indent.."}", exact
+		end
+
+		write = function(value, indent, seen, depth)
+			local kind = typeof(value)
+			local writer = writers[kind]
+			if not writer then
+				local ok, shown = pcall(tostring, value)
+				return left(kind..(ok and shown ~= kind and (": "..shown) or ""))
+			end
+			local ok, text, exact = pcall(writer, value, indent or "", seen or {}, depth or 1)
+			if not ok then return left(kind.." (could not be read)") end
+			return text, exact
+		end
+
+		return function(value, indent)
+			return write(value, indent or "", {}, 1)
+		end
+	end)()
+
 	Lib.ReadFile = function(filename)
 		if not env.readfile then return end
 
@@ -339,7 +534,7 @@ local function main()
 		if s and contents then return contents end
 	end
 
-	local currentfilename, currentextension, currentclickhandler
+	local currentextension, currentclickhandler
 	currentclickhandler = function() end
 	Lib.SaveAsPrompt = function(filename, codeToSave, ext)		
 		local win = ScriptViewer.SaveAsWindow
@@ -361,8 +556,6 @@ local function main()
 			nameBox.Position = UDim2.new(0,75,0,10)
 			nameBox.Size = UDim2.new(0,220,0,20)
 			win:Add(nameBox,"NameBox")
-
-			--nameBox.TextBox.Text = filename or ""
 
 			nameBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
 				saveButton:SetDisabled(#nameBox:GetText() == 0)
@@ -529,12 +722,16 @@ local function main()
 			self.Changed:Fire()
 		end
 
+		-- (an item that is in t twice is selected once: the parent of three selected children, say)
 		funcs.SetTable = function(self,t)
 			local newList,newMap = {},{}
 			self.List,self.Map = newList,newMap
-			table.move(t,1,#t,1,newList)
 			for i = 1,#t do
-				newMap[t[i]] = true
+				local item = t[i]
+				if not newMap[item] then
+					newMap[item] = true
+					newList[#newList+1] = item
+				end
 			end
 			self.Changed:Fire()
 		end
@@ -564,220 +761,6 @@ local function main()
 	Lib.IconMap = (function()
 		local funcs = {}
 		local IconList = {
-			Old = {
-				MapId = 483448923,
-				IconSize = 16,
-				Witdh = 16,
-				Height = 16,
-				Icons = {
-					["Accessory"] = 32;
-					["Accoutrement"] = 32;
-					["AdService"] = 73;
-					["Animation"] = 60;
-					["AnimationController"] = 60;
-					["AnimationTrack"] = 60;
-					["Animator"] = 60;
-					["ArcHandles"] = 56;
-					["AssetService"] = 72;
-					["Attachment"] = 34;
-					["Backpack"] = 20;
-					["BadgeService"] = 75;
-					["BallSocketConstraint"] = 89;
-					["BillboardGui"] = 64;
-					["BinaryStringValue"] = 4;
-					["BindableEvent"] = 67;
-					["BindableFunction"] = 66;
-					["BlockMesh"] = 8;
-					["BloomEffect"] = 90;
-					["BlurEffect"] = 90;
-					["BodyAngularVelocity"] = 14;
-					["BodyForce"] = 14;
-					["BodyGyro"] = 14;
-					["BodyPosition"] = 14;
-					["BodyThrust"] = 14;
-					["BodyVelocity"] = 14;
-					["BoolValue"] = 4;
-					["BoxHandleAdornment"] = 54;
-					["BrickColorValue"] = 4;
-					["Camera"] = 5;
-					["CFrameValue"] = 4;
-					["CharacterMesh"] = 60;
-					["Chat"] = 33;
-					["ClickDetector"] = 41;
-					["CollectionService"] = 30;
-					["Color3Value"] = 4;
-					["ColorCorrectionEffect"] = 90;
-					["ConeHandleAdornment"] = 54;
-					["Configuration"] = 58;
-					["ContentProvider"] = 72;
-					["ContextActionService"] = 41;
-					["CoreGui"] = 46;
-					["CoreScript"] = 18;
-					["CornerWedgePart"] = 1;
-					["CustomEvent"] = 4;
-					["CustomEventReceiver"] = 4;
-					["CylinderHandleAdornment"] = 54;
-					["CylinderMesh"] = 8;
-					["CylindricalConstraint"] = 89;
-					["Debris"] = 30;
-					["Decal"] = 7;
-					["Dialog"] = 62;
-					["DialogChoice"] = 63;
-					["DoubleConstrainedValue"] = 4;
-					["Explosion"] = 36;
-					["FileMesh"] = 8;
-					["Fire"] = 61;
-					["Flag"] = 38;
-					["FlagStand"] = 39;
-					["FloorWire"] = 4;
-					["Folder"] = 70;
-					["ForceField"] = 37;
-					["Frame"] = 48;
-					["GamePassService"] = 19;
-					["Glue"] = 34;
-					["GuiButton"] = 52;
-					["GuiMain"] = 47;
-					["GuiService"] = 47;
-					["Handles"] = 53;
-					["HapticService"] = 84;
-					["Hat"] = 45;
-					["HingeConstraint"] = 89;
-					["Hint"] = 33;
-					["HopperBin"] = 22;
-					["HttpService"] = 76;
-					["Humanoid"] = 9;
-					["ImageButton"] = 52;
-					["ImageLabel"] = 49;
-					["InsertService"] = 72;
-					["IntConstrainedValue"] = 4;
-					["IntValue"] = 4;
-					["JointInstance"] = 34;
-					["JointsService"] = 34;
-					["Keyframe"] = 60;
-					["KeyframeSequence"] = 60;
-					["KeyframeSequenceProvider"] = 60;
-					["Lighting"] = 13;
-					["LineHandleAdornment"] = 54;
-					["LocalScript"] = 18;
-					["LogService"] = 87;
-					["MarketplaceService"] = 46;
-					["Message"] = 33;
-					["Model"] = 2;
-					["ModuleScript"] = 71;
-					["Motor"] = 34;
-					["Motor6D"] = 34;
-					["MoveToConstraint"] = 89;
-					["NegateOperation"] = 78;
-					["NetworkClient"] = 16;
-					["NetworkReplicator"] = 29;
-					["NetworkServer"] = 15;
-					["NumberValue"] = 4;
-					["ObjectValue"] = 4;
-					["Pants"] = 44;
-					["ParallelRampPart"] = 1;
-					["Part"] = 1;
-					["ParticleEmitter"] = 69;
-					["PartPairLasso"] = 57;
-					["PathfindingService"] = 37;
-					["Platform"] = 35;
-					["Player"] = 12;
-					["PlayerGui"] = 46;
-					["Players"] = 21;
-					["PlayerScripts"] = 82;
-					["PointLight"] = 13;
-					["PointsService"] = 83;
-					["Pose"] = 60;
-					["PrismaticConstraint"] = 89;
-					["PrismPart"] = 1;
-					["PyramidPart"] = 1;
-					["RayValue"] = 4;
-					["ReflectionMetadata"] = 86;
-					["ReflectionMetadataCallbacks"] = 86;
-					["ReflectionMetadataClass"] = 86;
-					["ReflectionMetadataClasses"] = 86;
-					["ReflectionMetadataEnum"] = 86;
-					["ReflectionMetadataEnumItem"] = 86;
-					["ReflectionMetadataEnums"] = 86;
-					["ReflectionMetadataEvents"] = 86;
-					["ReflectionMetadataFunctions"] = 86;
-					["ReflectionMetadataMember"] = 86;
-					["ReflectionMetadataProperties"] = 86;
-					["ReflectionMetadataYieldFunctions"] = 86;
-					["RemoteEvent"] = 80;
-					["RemoteFunction"] = 79;
-					["ReplicatedFirst"] = 72;
-					["ReplicatedStorage"] = 72;
-					["RightAngleRampPart"] = 1;
-					["RocketPropulsion"] = 14;
-					["RodConstraint"] = 89;
-					["RopeConstraint"] = 89;
-					["Rotate"] = 34;
-					["RotateP"] = 34;
-					["RotateV"] = 34;
-					["RunService"] = 66;
-					["ScreenGui"] = 47;
-					["Script"] = 6;
-					["ScrollingFrame"] = 48;
-					["Seat"] = 35;
-					["Selection"] = 55;
-					["SelectionBox"] = 54;
-					["SelectionPartLasso"] = 57;
-					["SelectionPointLasso"] = 57;
-					["SelectionSphere"] = 54;
-					["ServerScriptService"] = 0;
-					["ServerStorage"] = 74;
-					["Shirt"] = 43;
-					["ShirtGraphic"] = 40;
-					["SkateboardPlatform"] = 35;
-					["Sky"] = 28;
-					["SlidingBallConstraint"] = 89;
-					["Smoke"] = 59;
-					["Snap"] = 34;
-					["Sound"] = 11;
-					["SoundService"] = 31;
-					["Sparkles"] = 42;
-					["SpawnLocation"] = 25;
-					["SpecialMesh"] = 8;
-					["SphereHandleAdornment"] = 54;
-					["SpotLight"] = 13;
-					["SpringConstraint"] = 89;
-					["StarterCharacterScripts"] = 82;
-					["StarterGear"] = 20;
-					["StarterGui"] = 46;
-					["StarterPack"] = 20;
-					["StarterPlayer"] = 88;
-					["StarterPlayerScripts"] = 82;
-					["Status"] = 2;
-					["StringValue"] = 4;
-					["SunRaysEffect"] = 90;
-					["SurfaceGui"] = 64;
-					["SurfaceLight"] = 13;
-					["SurfaceSelection"] = 55;
-					["Team"] = 24;
-					["Teams"] = 23;
-					["TeleportService"] = 81;
-					["Terrain"] = 65;
-					["TerrainRegion"] = 65;
-					["TestService"] = 68;
-					["TextBox"] = 51;
-					["TextButton"] = 51;
-					["TextLabel"] = 50;
-					["Texture"] = 10;
-					["TextureTrail"] = 4;
-					["Tool"] = 17;
-					["TouchTransmitter"] = 37;
-					["TrussPart"] = 1;
-					["UnionOperation"] = 77;
-					["UserInputService"] = 84;
-					["Vector3Value"] = 4;
-					["VehicleSeat"] = 35;
-					["VelocityMotor"] = 34;
-					["WedgePart"] = 1;
-					["Weld"] = 34;
-					["Workspace"] = 19;
-
-				}
-			},
 			Vanilla3 = {
 				MapId = (114851699900089),
 				IconSize = 32,
@@ -1718,28 +1701,10 @@ local function main()
 				Witdh = 18,
 				Height = 18,
 			},
-			NewLight = {
-				MapId = "",
-				Icons = {
-					Class = "rbxasset://studio_svg_textures/Shared/InsertableObjects/Light/Standard/",
-				},
-				IconSize = 16,
-				Witdh = 18,
-				Height = 18,
-			}
 		}
-		if Settings.ClassIcon and IconList[Settings.ClassIcon] then
-			funcs.ExplorerIcons = {
-				["MapId"] = IconList[Settings.ClassIcon].MapId,
-				["Icons"] = IconList[Settings.ClassIcon].Icons,
-				["IconSize"] = IconList[Settings.ClassIcon].IconSize,
-				["Witdh"] = IconList[Settings.ClassIcon].Witdh,
-				["Height"] = IconList[Settings.ClassIcon].Height}
-		else
-			funcs.ExplorerIcons = { ["MapId"] = IconList.Old.MapId, ["Icons"] = IconList.Old.Icons, ["IconSize"] = IconList.Old.IconSize }
-		end
-		
-		
+		-- A saved set that no longer exists (Old), or none at all: the default
+		if not IconList[Settings.ClassIcon] then Settings.ClassIcon = "NewDark" end
+		funcs.ExplorerIcons = table.clone(IconList[Settings.ClassIcon]) -- a copy: Explorer.Init swaps the set's Icons
 
 		funcs.GetLabel = function(self)
 			local label = Instance.new("ImageLabel")
@@ -1774,11 +1739,6 @@ local function main()
 			end
 		end
 
-		funcs.IconDehash = function(self, _id)
-			return math.floor(_id / 14 % 14), math.floor(_id % 14)
-		end
-		
-		local ClassNameNoImage = {}
 		funcs.GetExplorerIcon = function(self, obj, index)
 			if Settings.ClassIcon == "Vanilla3" then
 				obj.Size = UDim2.fromOffset(16, 16)
@@ -1786,7 +1746,7 @@ local function main()
 				index = (self.ExplorerIcons.Icons[index] or 250) - 1
 				obj.ImageRectOffset = Vector2.new(funcs.ExplorerIcons.IconSize * (index % funcs.ExplorerIcons.Height), funcs.ExplorerIcons.IconSize * math.floor(index / funcs.ExplorerIcons.Height))
 				obj.ImageRectSize = Vector2.new(funcs.ExplorerIcons.IconSize, funcs.ExplorerIcons.IconSize)
-			elseif Settings.ClassIcon == "NewLight" or Settings.ClassIcon == "NewDark" then
+			else
 				local apiClass = API and API.Classes[index]
 				local isService = apiClass and apiClass.Tags.Service
 				
@@ -1794,16 +1754,7 @@ local function main()
 				index = (self.ExplorerIcons.Icons[index] or (isService and self.ExplorerIcons.Icons.Service) or self.ExplorerIcons.Icons.Placeholder) - 1
 				obj.ImageRectOffset = Vector2.new(funcs.ExplorerIcons.IconSize * (index % funcs.ExplorerIcons.Height), funcs.ExplorerIcons.IconSize * math.floor(index / funcs.ExplorerIcons.Height))
 				obj.ImageRectSize = Vector2.new(funcs.ExplorerIcons.IconSize, funcs.ExplorerIcons.IconSize)
-			else
-				index = (self.ExplorerIcons.Icons[index] or 0)
-				local row, col = self:IconDehash(index)
-				local MapSize = Vector2.new(256, 256)
-				local pad, border = 2, 1
-
-				obj.Position = UDim2.new(-col - (pad * (col + 1) + border) / funcs.ExplorerIcons.IconSize, 0, -row - (pad * (row + 1) + border) / funcs.ExplorerIcons.IconSize, 0)
-				obj.Size = UDim2.new(MapSize.X / funcs.ExplorerIcons.IconSize, 0, MapSize.Y / funcs.ExplorerIcons.IconSize, 0)
 			end
-			
 		end
 
 		funcs.DisplayExplorerIcons = function(self, Frame, index)
@@ -1867,7 +1818,6 @@ local function main()
 		local function drawThumb(self)
 			local total = self.TotalSpace
 			local visible = self.VisibleSpace
-			local index = self.Index
 			local scrollThumb = self.GuiElems.ScrollThumb
 			local scrollThumbFrame = self.GuiElems.ScrollThumbFrame
 
@@ -2113,7 +2063,6 @@ local function main()
 		funcs.Update = function(self,nocallback)
 			local total = self.TotalSpace
 			local visible = self.VisibleSpace
-			local index = self.Index
 			local button1 = self.GuiElems.Button1
 			local button2 = self.GuiElems.Button2
 
@@ -2202,10 +2151,6 @@ local function main()
 		funcs.GetScrollPercent = function(self)
 			return self.Index/(self.TotalSpace-self.VisibleSpace)
 		end
-		funcs.SetScrollPercent = function(self,perc)
-			self.Index = math.floor(perc*(self.TotalSpace-self.VisibleSpace))
-			self:Update()
-		end
 		funcs.ScrollToDirection = function(self, Direaction)
 			if Direaction == "Up" then
 				self:ScrollUp()
@@ -2269,7 +2214,6 @@ local function main()
 	Lib.Window = (function()
 		local funcs = {}
 		local static = {MinWidth = 200, FreeWidth = 200}
-		local mouse = plr:GetMouse()
 		local sidesGui,alignIndicator
 		local visibleWindows = {}
 		local leftSide = {Width = 300, Windows = {}, ResizeCons = {}, Hidden = true}
@@ -2355,7 +2299,6 @@ local function main()
 			end)
 
 			resizer.InputEnded:Connect(function(input)
-				--if input.UserInputType == Enum.UserInputType.Touch and Main.AllowDraggableOnMobile == false then return end
 				if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and self.Resizing ~= resizer then
 					resizer.BackgroundTransparency = 1
 				end
@@ -2456,12 +2399,7 @@ local function main()
 			self.GuiElems.Minimize = guiTopBar.Minimize
 			self.GuiElems.ResizeControls = guiResizeControls
 			self.ContentPane = guiMain.Content
-			
-			-- dont mind this, im testing what if the frame background is blurry 
-			--blur.new(guiMain.Content, "Rectangle")
 
-			--blur.updateAll()
-			
 			local ButtonDown = false
 			guiTopBar.MouseButton1Down:Connect(function() ButtonDown = true end)
 			guiTopBar.MouseButton1Up:Connect(function() ButtonDown = false end)
@@ -2473,7 +2411,6 @@ local function main()
 
 			if Settings.Window.Transparency then
 				self.GuiElems.Content.BackgroundTransparency = Settings.Window.Transparency
-				--self.GuiElems
 			end
 
 
@@ -2635,16 +2572,6 @@ local function main()
 			leftSide.Frame.Resizer.Position = UDim2.new(0,leftSide.Width,0,0)
 			rightSide.Frame.Resizer.Position = UDim2.new(0,-5,0,0)
 
-			--leftSide.Frame.Visible = (#leftSide.Windows > 0)
-			--rightSide.Frame.Visible = (#rightSide.Windows > 0)
-
-			--[[if #leftSide.Windows > 0 and leftSide.Frame.Position == UDim2.new(0,-leftSide.Width-5,0,0) then
-				leftSide.Frame:TweenPosition(UDim2.new(0,0,0,0),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			elseif #leftSide.Windows == 0 and leftSide.Frame.Position == UDim2.new(0,0,0,0) then
-				leftSide.Frame:TweenPosition(UDim2.new(0,-leftSide.Width-5,0,0),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			end
-			local rightTweenPos = (#rightSide.Windows == 0 and UDim2.new(1,5,0,0) or UDim2.new(1,-rightSide.Width,0,0))
-			rightSide.Frame:TweenPosition(rightTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)]]
 			local leftHidden = #leftSide.Windows == 0 or leftSide.Hidden
 			local rightHidden = #rightSide.Windows == 0 or rightSide.Hidden
 			local leftPos = (leftHidden and UDim2.new(0,-leftSide.Width-10,0,0) or UDim2.new(0,0,0,0))
@@ -2812,7 +2739,6 @@ local function main()
 				local size = UDim2.new(0,side.Width,0,v.SizeY)
 				local pos = UDim2.new(sideFramePos.X.Scale,sideFramePos.X.Offset,0,currentPos)
 				Lib.ShowGui(v.Gui)
-				--v.GuiElems.Main:TweenSizeAndPosition(size,pos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
 				if noTween then
 					v.GuiElems.Main.Size = size
 					v.GuiElems.Main.Position = pos
@@ -2836,9 +2762,6 @@ local function main()
 					newTemplate.Parent = side.Frame
 				end
 			end
-
-			--side.Frame.Back.Position = UDim2.new(0,0,0,0)
-			--side.Frame.Back.Size = UDim2.new(0,side.Width,1,0)
 		end
 
 		local function updateSide(side,noTween)
@@ -2882,11 +2805,6 @@ local function main()
 				Lib.ShowGui(visibleWindows[i].Gui)
 				count = count + 1
 			end
-
-			--[[local leftTweenPos = (#leftSide.Windows == 0 and UDim2.new(0,-leftSide.Width-5,0,0) or UDim2.new(0,0,0,0))
-			leftSide.Frame:TweenPosition(leftTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			local rightTweenPos = (#rightSide.Windows == 0 and UDim2.new(1,5,0,0) or UDim2.new(1,-rightSide.Width,0,0))
-			rightSide.Frame:TweenPosition(rightTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)]]
 		end
 
 		funcs.SetMinimized = function(self,set,mode)
@@ -2985,10 +2903,6 @@ local function main()
 			if name then self.Elements[name] = obj end
 		end
 
-		funcs.GetElement = function(self,obj,name)
-			return self.Elements[name]
-		end
-
 		funcs.AlignTo = function(self,side,pos,size,silent)
 			if table.find(side.Windows,self) or self.Closed then return end
 
@@ -3053,46 +2967,6 @@ local function main()
 			self.Aligned = false
 			self.Gui.Parent = nil
 			updateWindows(true)
-		end
-		
-		funcs.Destroy = function(self)
-			self.Closed = true
-			self:SetResizableInternal(false)
-
-			Lib.FindAndRemove(leftSide.Windows,self)
-			Lib.FindAndRemove(rightSide.Windows,self)
-			Lib.FindAndRemove(visibleWindows,self)
-
-			self.MinimizeAnim.Disable()
-			self.CloseAnim.Disable()
-			self.ClosedSide = self.Side
-			self.Side = nil
-			self.OnDeactivate:Fire()
-
-			if not self.Aligned then
-				self:StopTweens()
-				local ti = TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
-
-				local closeTime = tick()
-				self.LastClose = closeTime
-
-				self:DoTween(self.GuiElems.Main,ti,{Size = UDim2.new(0,self.SizeX,0,20)})
-				self:DoTween(self.GuiElems.Title,ti,{TextTransparency = 1})
-				self:DoTween(self.GuiElems.Minimize.ImageLabel,ti,{ImageTransparency = 1})
-				self:DoTween(self.GuiElems.Close.ImageLabel,ti,{ImageTransparency = 1})
-				Lib.FastWait(0.2)
-				if closeTime ~= self.LastClose then return end
-
-				self:DoTween(self.GuiElems.TopBar,ti,{BackgroundTransparency = 1})
-				self:DoTween(self.GuiElems.Outlines,ti,{ImageTransparency = 1})
-				Lib.FastWait(0.2)
-				if closeTime ~= self.LastClose then return end
-			end
-
-			self.Aligned = false
-			--self.Gui.Parent = nil
-			updateWindows(true)
-			self.Gui:Destroy()
 		end
 
 		funcs.Hide = funcs.Close
@@ -3249,7 +3123,6 @@ local function main()
 
 		-- Windows with an id take part in saved layouts (see GetLayout and ApplyLayout).
 		funcs.SetLayoutId = function(self,id)
-			self.LayoutId = id
 			byId[id] = self
 		end
 
@@ -3326,6 +3199,7 @@ local function main()
 			if not sidesGui then return end
 
 			local sides = layout.sides or {}
+			local wasHidden = {[leftSide] = leftSide.Hidden,[rightSide] = rightSide.Hidden}
 			for name,side in pairs({left = leftSide,right = rightSide}) do
 				local s = sides[name]
 				if s then
@@ -3344,6 +3218,14 @@ local function main()
 					arrange(win,st)
 				elseif not win.Closed then
 					win:Close()
+				end
+			end
+			-- a side panel that came into view or went out of it: its windows are told, as when its toggle is clicked
+			for side,was in pairs(wasHidden) do
+				if side.Hidden ~= was then
+					for _,win in pairs(side.Windows) do
+						if side.Hidden then win.OnDeactivate:Fire() else win.OnActivate:Fire() end
+					end
 				end
 			end
 			updateWindows(true)
@@ -3614,10 +3496,6 @@ local function main()
 			}
 		end
 
-		funcs.UnRegister = function(self,name)
-			self.Registered[name] = nil
-		end
-
 		funcs.AddDivider = function(self,text)
 			self.QueuedDivider = false
 			local textWidth = text and service.TextService:GetTextSize(text,14,Enum.Font.SourceSans,Vector2.new(999999999,20)).X or nil
@@ -3685,8 +3563,7 @@ local function main()
 						elseif item.Icon then
 							iconIndex =  item.Icon
 						end
-						
-						-- Explorer.MiscIcons:DisplayExplorerIcons(newEntry.Icon, iconIndex)
+
 						if item.IconMap then
 							if type(iconIndex) == "number" then
 								item.IconMap:Display(newEntry.Icon, iconIndex)
@@ -4079,15 +3956,9 @@ local function main()
 			["&"] = "&amp;"
 		}
 
-		local tabSub = "\205"
-		local tabReplacement = (" %s%s "):format(tabSub,tabSub)
-
-		local tabJumps = {
-			[("[^%s] %s"):format(tabSub,tabSub)] = 0,
-			[(" %s%s"):format(tabSub,tabSub)] = -1,
-			[("%s%s "):format(tabSub,tabSub)] = 2,
-			[("%s [^%s]"):format(tabSub,tabSub)] = 1,
-		}
+		-- A line longer than this (minified or obfuscated code) is coloured a block of this many columns at
+		-- a time, as far as the view has reached: colouring all of it takes seconds per megabyte.
+		local LONG_LINE = 4000
 
 		local tweenService = service.TweenService
 		local lineTweens = {}
@@ -4130,15 +4001,10 @@ local function main()
 				obj.Editing = false
 			end)
 
+			-- The hidden box only holds the selection, so that Ctrl+C copies it. Typing replaces that: put it back.
 			editBox:GetPropertyChangedSignal("Text"):Connect(function()
-				local text = editBox.Text
-				if #text == 0 or obj.EditBoxCopying then return end
-				if obj.ReadOnly then
-					obj:SetCopyableSelection() -- typing replaced the copy buffer: put the selection back and change nothing
-					return
-				end
-				editBox.Text = ""
-				obj:AppendText(text)
+				if #editBox.Text == 0 or obj.EditBoxCopying then return end
+				obj:SetCopyableSelection()
 			end)
 		end
 
@@ -4159,7 +4025,7 @@ local function main()
 					local scrollPowerV,scrollPowerH = 0,0
 					selY = math.min(#lines-1,selY)
 					local relativeLine = lines[selY+1] or ""
-					selX = math.min(#relativeLine, selX + obj:TabAdjust(selX,selY))
+					selX = math.min(#relativeLine, selX)
 
 					obj.SelectionRange = {{-1,-1},{-1,-1}}
 					obj:MoveCursor(selX,selY)
@@ -4173,7 +4039,7 @@ local function main()
 
 						sel2Y = math.min(#lines-1,sel2Y)
 						local relativeLine = lines[sel2Y+1] or ""
-						sel2X = math.min(#relativeLine, sel2X + obj:TabAdjust(sel2X,sel2Y))
+						sel2X = math.min(#relativeLine, sel2X)
 
 						if sel2Y < selY or (sel2Y == selY and sel2X < selX) then
 							obj.SelectionRange = {{sel2X,sel2Y},{selX,selY}}
@@ -4192,7 +4058,6 @@ local function main()
 							mouseEvent:Disconnect()
 							scrollEvent:Disconnect()
 							obj:SetCopyableSelection()
-							--updateSelection()
 						end
 					end)
 
@@ -4317,7 +4182,7 @@ local function main()
 			if not lines[selY+1] or not lines[sel2Y+1] then return "" end
 
 			if deltaLines == 0 then
-				return self:ConvertText(lines[selY+1]:sub(selX+1,sel2X), false)
+				return lines[selY+1]:sub(selX+1,sel2X)
 			end
 
 			local leftSub = lines[selY+1]:sub(selX+1)
@@ -4325,9 +4190,7 @@ local function main()
 
 			local parts = table.move(lines, selY+2, sel2Y, 2, {leftSub})
 			parts[#parts+1] = rightSub
-			local result = table.concat(parts, "\n")
-
-			return self:ConvertText(result,false)
+			return table.concat(parts, "\n")
 		end
 
 		funcs.SetCopyableSelection = function(self)
@@ -4380,8 +4243,7 @@ local function main()
 					end)
 				elseif keycode == keycodes.Left then
 					setupMove(keycodes.Left,function()
-						local line = self.Lines[self.CursorY+1] or ""
-						self.CursorX = self.CursorX - 1 - (line:sub(self.CursorX-3,self.CursorX) == tabReplacement and 3 or 0)
+						self.CursorX = self.CursorX - 1
 						if self.CursorX < 0 then
 							self.CursorY = self.CursorY - 1
 							local line2 = self.Lines[self.CursorY+1] or ""
@@ -4394,68 +4256,13 @@ local function main()
 				elseif keycode == keycodes.Right then
 					setupMove(keycodes.Right,function()
 						local line = self.Lines[self.CursorY+1] or ""
-						self.CursorX = self.CursorX + 1 + (line:sub(self.CursorX+1,self.CursorX+4) == tabReplacement and 3 or 0)
+						self.CursorX = self.CursorX + 1
 						if self.CursorX > #line then
 							self.CursorY = self.CursorY + 1
 							self.CursorX = 0
 						end
 						self.FloatCursorX = self.CursorX
 						self:UpdateCursor()
-						self:JumpToCursor()
-					end)
-				elseif keycode == keycodes.Backspace and not self.ReadOnly then
-					setupMove(keycodes.Backspace,function()
-						local startRange,endRange
-						if self:IsValidRange() then
-							startRange = self.SelectionRange[1]
-							endRange = self.SelectionRange[2]
-						else
-							endRange = {self.CursorX,self.CursorY}
-						end
-
-						if not startRange then
-							local line = self.Lines[self.CursorY+1] or ""
-							self.CursorX = self.CursorX - 1 - (line:sub(self.CursorX-3,self.CursorX) == tabReplacement and 3 or 0)
-							if self.CursorX < 0 then
-								self.CursorY = self.CursorY - 1
-								local line2 = self.Lines[self.CursorY+1] or ""
-								self.CursorX = #line2
-							end
-							self.FloatCursorX = self.CursorX
-							self:UpdateCursor()
-
-							startRange = startRange or {self.CursorX,self.CursorY}
-						end
-
-						self:DeleteRange({startRange,endRange},false,true)
-						self:ResetSelection(true)
-						self:JumpToCursor()
-					end)
-				elseif keycode == keycodes.Delete and not self.ReadOnly then
-					setupMove(keycodes.Delete,function()
-						local startRange,endRange
-						if self:IsValidRange() then
-							startRange = self.SelectionRange[1]
-							endRange = self.SelectionRange[2]
-						else
-							startRange = {self.CursorX,self.CursorY}
-						end
-
-						if not endRange then
-							local line = self.Lines[self.CursorY+1] or ""
-							local endCursorX = self.CursorX + 1 + (line:sub(self.CursorX+1,self.CursorX+4) == tabReplacement and 3 or 0)
-							local endCursorY = self.CursorY
-							if endCursorX > #line then
-								endCursorY = endCursorY + 1
-								endCursorX = 0
-							end
-							self:UpdateCursor()
-
-							endRange = endRange or {endCursorX,endCursorY}
-						end
-
-						self:DeleteRange({startRange,endRange},false,true)
-						self:ResetSelection(true)
 						self:JumpToCursor()
 					end)
 				elseif service.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
@@ -4474,11 +4281,6 @@ local function main()
 			end
 		end
 
-		funcs.ResetSelection = function(self,norefresh)
-			self.SelectionRange = {{-1,-1},{-1,-1}}
-			if not norefresh then self:Refresh() end
-		end
-
 		funcs.IsValidRange = function(self,range)
 			local selectionRange = range or self.SelectionRange
 			local selX,selY = selectionRange[1][1], selectionRange[1][2]
@@ -4489,98 +4291,12 @@ local function main()
 			return true
 		end
 
-		funcs.DeleteRange = function(self,range,noprocess,updatemouse)
-			range = range or self.SelectionRange
-			if not self:IsValidRange(range) then return end
-
-			local lines = self.Lines
-			local selX,selY = range[1][1], range[1][2]
-			local sel2X,sel2Y = range[2][1], range[2][2]
-			local deltaLines = sel2Y-selY
-
-			if not lines[selY+1] or not lines[sel2Y+1] then return end
-
-			local leftSub = lines[selY+1]:sub(1,selX)
-			local rightSub = lines[sel2Y+1]:sub(sel2X+1)
-			lines[selY+1] = leftSub..rightSub
-
-			if deltaLines > 0 then
-				local n = #lines
-				table.move(lines, sel2Y+2, n, selY+2)
-				for i = n, n-deltaLines+1, -1 do lines[i] = nil end
-			end
-
-			if range == self.SelectionRange then self.SelectionRange = {{-1,-1},{-1,-1}} end
-			if updatemouse then
-				self.CursorX = selX
-				self.CursorY = selY
-				self:UpdateCursor()
-			end
-
-			if not noprocess then
-				self:ProcessTextChange()
-			end
-		end
-
-		funcs.AppendText = function(self,text)
-			self:DeleteRange(nil,true,true)
-			local lines,cursorX,cursorY = self.Lines,self.CursorX,self.CursorY
-			local line = lines[cursorY+1]
-			local before = line:sub(1,cursorX)
-			local after = line:sub(cursorX+1)
-
-			text = text:gsub("\r\n","\n")
-			text = self:ConvertText(text,true) -- Tab Convert
-
-			local textLines = text:split("\n")
-			local insert = table.insert
-
-			for i = 1,#textLines do
-				local linePos = cursorY+i
-				if i > 1 then insert(lines,linePos,"") end
-
-				local textLine = textLines[i]
-				local newBefore = (i == 1 and before or "")
-				local newAfter = (i == #textLines and after or "")
-
-				lines[linePos] = newBefore..textLine..newAfter
-			end
-
-			if #textLines > 1 then cursorX = 0 end
-
-			self:ProcessTextChange()
-			self.CursorX = cursorX + #textLines[#textLines]
-			self.CursorY = cursorY + #textLines-1
-			self:UpdateCursor()
-		end
-
 		funcs.ScrollDelta = function(self,x,y)
 			self.ScrollV:ScrollTo(self.ScrollV.Index + y)
 			self.ScrollH:ScrollTo(self.ScrollH.Index + x)
 		end
 
-		-- x and y starts at 0
-		funcs.TabAdjust = function(self,x,y)
-			local lines = self.Lines
-			local line = lines[y+1]
-			x=x+1
-
-			if line then
-				local left = line:sub(x-1,x-1)
-				local middle = line:sub(x,x)
-				local right = line:sub(x+1,x+1)
-				local selRange = (#left > 0 and left or " ") .. (#middle > 0 and middle or " ") .. (#right > 0 and right or " ")
-
-				for i,v in pairs(tabJumps) do
-					if selRange:find(i) then
-						return v
-					end
-				end
-			end
-			return 0
-		end
-
-		funcs.SetEditing = function(self,on,input)			
+		funcs.SetEditing = function(self,on,input)
 			self:UpdateCursor(input)
 
 			if on then
@@ -4662,8 +4378,6 @@ local function main()
 				cursorY = 0
 			end
 
-			cursorX = cursorX + self:TabAdjust(cursorX,cursorY)
-
 			-- Update modified
 			self.CursorX = cursorX
 			self.CursorY = cursorY
@@ -4700,9 +4414,7 @@ local function main()
 		end
 
 		funcs.PreHighlight = function(self)
-			local start = tick()
 			local text = self.Text:gsub("\\\\","  ")
-			--print("BACKSLASH SUB",tick()-start)
 			local textLen = #text
 			local found = {}
 			local foundMap = {}
@@ -4727,7 +4439,6 @@ local function main()
 					x,y,extra = find(str,pattern,init,raw)
 				end
 			end
-			local start = tick()
 			findAll(text,'"',1,true)
 			findAll(text,"'",2,true)
 			findAll(text,"%[(=*)%[",3)
@@ -4736,11 +4447,10 @@ local function main()
 
 			local newLines = self.NewLines
 			local curLine = 0
-			local lineTableCount = 1
-			local lineStart = 0
 			local lineEnd = 0
 			local lastEnding = 0
 			local foundHighlights = {}
+			local _
 
 			for i = 1,#found do
 				local pos = found[i]
@@ -4776,14 +4486,12 @@ local function main()
 
 				while pos > lineEnd do
 					curLine = curLine + 1
-					--lineTableCount = 1
 					lineEnd = newLines[curLine] or textLen+1
 				end
 				while true do
 					local lineTable = foundHighlights[curLine]
 					if not lineTable then lineTable = {} foundHighlights[curLine] = lineTable end
 					lineTable[pos] = {typ,ending}
-					--lineTableCount = lineTableCount + 1
 
 					if ending > lineEnd then
 						curLine = curLine + 1
@@ -4794,24 +4502,29 @@ local function main()
 				end
 
 				lastEnding = ending
-				--if i < 200 then print(curLine) end
 			end
 			self.PreHighlights = foundHighlights
-			--print(tick()-start)
-			--print(#found,curLine)
 		end
 
-		funcs.HighlightLine = function(self,line)
+		-- The colour type of every column of a line, kept until the text changes. lastCol is the last column
+		-- the caller draws: a long line is coloured only that far, a block at a time, and goes on from where
+		-- it stopped once the view reaches further (upTo and the scanner's state are kept with the colours).
+		funcs.HighlightLine = function(self,line,lastCol)
+			local lineText = self.Lines[line] or ""
+			local lineLen = #lineText
+			local upTo = lineLen
+			if lastCol and lineLen > LONG_LINE then
+				upTo = math.min(lineLen,math.ceil(math.max(lastCol,1)/LONG_LINE)*LONG_LINE)
+			end
+
 			local cached = self.ColoredLines[line]
-			if cached then return cached end
+			if cached and cached.upTo >= upTo then return cached end
 
 			local sub = string.sub
 			local find = string.find
 			local match = string.match
-			local highlights = {}
+			local highlights = cached or {}
 			local preHighlights = self.PreHighlights[line] or {}
-			local lineText = self.Lines[line] or ""
-			local lineLen = #lineText
 			local lastEnding = 0
 			local currentType = 0
 			local lastWord = nil
@@ -4819,19 +4532,25 @@ local function main()
 			local funcStatus = 0
 			local lineStart = self.NewLines[line-1] or 0
 
-			local preHighlightMap = {}
-			for pos,data in next,preHighlights do
-				local relativePos = pos-lineStart
-				if relativePos < 1 then
-					currentType = data[1]
-					lastEnding = data[2] - lineStart
-					--warn(pos,data[2])
-				else
-					preHighlightMap[relativePos] = {data[1],data[2]-lineStart}
+			local preHighlightMap = cached and cached.pre
+			local from = 1
+			if cached then -- the next block of a long line: on from where the last one stopped
+				from = cached.upTo + 1
+				lastEnding,currentType,lastWord,wordBeginsDotted,funcStatus = cached.lastEnding,cached.currentType,cached.lastWord,cached.wordBeginsDotted,cached.funcStatus
+			else
+				preHighlightMap = {}
+				for pos,data in next,preHighlights do
+					local relativePos = pos-lineStart
+					if relativePos < 1 then
+						currentType = data[1]
+						lastEnding = data[2] - lineStart
+					else
+						preHighlightMap[relativePos] = {data[1],data[2]-lineStart}
+					end
 				end
 			end
 
-			for col = 1,#lineText do
+			for col = from,upTo do
 				if col <= lastEnding then highlights[col] = currentType continue end
 
 				local pre = preHighlightMap[col]
@@ -4857,7 +4576,7 @@ local function main()
 							end
 
 							if wordType ~= 8 then
-								local x,y,br = find(lineText,"^%s*([%({\"'])",lastEnding+1)
+								local x,_,br = find(lineText,"^%s*([%({\"'])",lastEnding+1)
 								if x then
 									wordType = (funcStatus > 0 and br == "(" and 16) or 9
 									funcStatus = 0
@@ -4930,17 +4649,21 @@ local function main()
 
 			-- a note added in the Notepad (" -- >> text", inside a comment) gets its own colour
 			local noteAt = find(lineText," %-%- >> ",1)
-			if noteAt and highlights[noteAt + 1] == 4 then
-				for col = noteAt + 1,lineLen do highlights[col] = 18 end
+			local noteType = noteAt and highlights[noteAt + 1]
+			if noteType == 4 or noteType == 18 then -- (18: an earlier block of the line found it already)
+				for col = noteAt + 1,upTo do highlights[col] = 18 end
 			end
 
+			highlights.upTo = upTo
+			highlights.pre = upTo < lineLen and preHighlightMap or nil -- (only kept while there is more of the line to do)
+			if upTo < lineLen then
+				highlights.lastEnding,highlights.currentType,highlights.lastWord,highlights.wordBeginsDotted,highlights.funcStatus = lastEnding,currentType,lastWord,wordBeginsDotted,funcStatus
+			end
 			self.ColoredLines[line] = highlights
 			return highlights
 		end
 
 		funcs.Refresh = function(self)
-			local start = tick()
-
 			local linesFrame = self.Frame.Lines
 			local hSize = math.max(0,linesFrame.AbsoluteSize.X)
 			local vSize = math.max(0,linesFrame.AbsoluteSize.Y)
@@ -4993,7 +4716,7 @@ local function main()
 				local lineColor = self.LineColors and self.LineColors[relaY]
 				if lineColor then lineFrame.BackgroundColor3 = lineColor end
 				lineFrame.BackgroundTransparency = lineColor and 0.65 or 1
-				local highlights = self:HighlightLine(relaY)
+				local highlights = self:HighlightLine(relaY,viewX+maxCols)
 				local colStart = viewX + 1
 
 				local richTemplates = self.RichTemplates
@@ -5008,7 +4731,7 @@ local function main()
 				local selPos2 = selectionRange[2]
 				local selRow,selColumn = selPos1[2],selPos1[1]
 				local sel2Row,sel2Column = selPos2[2],selPos2[1]
-				local selRelaX,selRelaY = viewX,relaY-1
+				local selRelaY = relaY-1
 
 				if selRelaY >= selPos1[2] and selRelaY <= selPos2[2] then
 					local fontSizeX = math.ceil(self.FontSize/2)
@@ -5054,19 +4777,15 @@ local function main()
 				end
 
 				local lastText = gsub(sub(lineText,colStart,viewX+maxCols),"['\"<>&]",richReplace)
-				--warn("SUB",colStart,viewX+maxCols-1)
 				if #lastText > 0 then
 					resText = resText .. (curTemplate ~= textTemplate and (curTemplate .. lastText .. "</font>") or lastText)
 				end
 
 				if self.Lines[relaY] then
-
-					-- REMOVED LINE HIGHLIGHT DUE TO BUG OFFSET
 					-- optional colour per line number (line -> "#rrggbb"), used for bookmarked lines
 					local shown = relaY == self.CursorY and ("<b>"..relaY.."</b>") or tostring(relaY)
 					local tint = self.LineNumberColors and self.LineNumberColors[relaY]
 					lineNumberStr = lineNumberStr .. (tint and ('<font color="'..tint..'">'..shown.."</font>") or shown) .. "\n"
-					--lineNumberStr = lineNumberStr .. (relaY == self.CursorY and (relaY.."\n") or relaY .. "\n")
 				end
 
 				lineFrame.Label.Text = resText
@@ -5079,8 +4798,6 @@ local function main()
 
 			self.Frame.LineNumbers.Text = lineNumberStr
 			self:UpdateCursor()
-
-			--print("REFRESH TIME",tick()-start)
 		end
 
 		funcs.UpdateView = function(self)
@@ -5132,7 +4849,9 @@ local function main()
 			end
 		end
 
-		funcs.ProcessTextChange = function(self,immediate)
+		-- The lines were set, or changed in place (a rename, a note): the text they make, the scroll bars, the
+		-- scan for strings and comments (about 150 ms at 20,000 lines) and the view all follow.
+		funcs.ProcessTextChange = function(self)
 			local maxCols = 0
 			local lines = self.Lines
 
@@ -5145,56 +4864,29 @@ local function main()
 
 			self.MaxTextCols = maxCols
 			self:UpdateView()
-
-			-- Rescanning the whole text for strings/comments is the slow part (~150 ms at 20k lines),
-			-- so while typing in big scripts it only runs once typing pauses. Colors catch up then.
-			local highlightId = (self.HighlightId or 0) + 1
-			self.HighlightId = highlightId
-			local function rehighlight()
-				if self.HighlightId ~= highlightId then return end
-				self.Text = table.concat(self.Lines,"\n")
-				self:MapNewLines()
-				self:PreHighlight()
-				self:Refresh()
-			end
-
-			if immediate or #lines < 2000 then
-				rehighlight()
-			else
-				self.ColoredLines = {}
-				self:Refresh()
-				task.delay(0.2, rehighlight)
-			end
-			--self.TextChanged:Fire()
+			self.Text = table.concat(lines,"\n")
+			self:MapNewLines()
+			self:PreHighlight()
+			self:Refresh()
 		end
 
-		funcs.ConvertText = function(self,text,toEditor)
-			if toEditor then
-				--return text:gsub("\t",(" %s%s "):format(tabSub,tabSub))
-				return text:gsub("\t","    ") -- Fixed unknown unicode showing when pressing TAB
-			else
-				return text:gsub((" %s%s "):format(tabSub,tabSub),"\t")
-			end
-		end
-
-		funcs.GetText = function(self) -- TODO: better (use new tab format)
-			local source = table.concat(self.Lines,"\n")
-			return self:ConvertText(source,false) -- Tab Convert
+		-- The text of the lines, joined when they last changed (so asking for it costs nothing)
+		funcs.GetText = function(self)
+			return self.Text
 		end
 
 		funcs.SetText = function(self,txt)
-			txt = self:ConvertText(txt,true) -- Tab Convert
+			txt = txt:gsub("\t","    ") -- a tab is shown as four spaces
 			local lines = self.Lines
 			table.clear(lines)
 			local count = 1
 
 			for line in txt:gmatch("([^\n\r]*)[\n\r]?") do
-				local len = #line
 				lines[count] = line
 				count = count + 1
 			end
 
-			self:ProcessTextChange(true)
+			self:ProcessTextChange()
 		end
 
 		funcs.MakeRichTemplates = function(self)
@@ -5231,8 +4923,7 @@ local function main()
 				ColoredLines = {},
 				Lines = {""},
 				LineFrames = {},
-				Editable = true,
-				ReadOnly = false, -- true: the cursor, selection and copying work, but nothing can be typed or deleted
+				Editable = true, -- the cursor, selection and copying work; nothing can be typed (it shows text, it does not edit it)
 				Editing = false,
 				CursorX = 0,
 				CursorY = 0,
@@ -5352,24 +5043,7 @@ local function main()
 				Middle = filler.middle
 			}
 	
-			-- New:
-			--[[checkbox.Activated:Connect(function()
-				if Lib.CheckMouseInGui(checkbox) then
-					if self.Style == 0 then
-						ripple(ripples_container, self.Disabled and self.Colors.Disabled or self.Colors.Primary)
-					end
-
-					if not self.Disabled then
-						self:SetState(not self.Toggled,true)
-					else
-						self:Paint()
-					end
-
-					self.OnInput:Fire()
-				end
-			end)]]
-			
-			-- Best input compatibility:
+			-- MouseButton1Up: the input that works with mouse and touch alike
 			checkbox.MouseButton1Up:Connect(function()
 				if Lib.CheckMouseInGui(checkbox) then
 					if self.Style == 0 then
@@ -5385,32 +5059,6 @@ local function main()
 					self.OnInput:Fire()
 				end
 			end)
-
-			-- Old:
-			--[[checkbox.InputBegan:Connect(function(i)
-				if i.UserInputType == Enum.UserInputType.MouseButton1 then
-					local release
-					release = service.UserInputService.InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 then
-							release:Disconnect()
-
-							if Lib.CheckMouseInGui(checkbox) then
-								if self.Style == 0 then
-									ripple(ripples_container, self.Disabled and self.Colors.Disabled or self.Colors.Primary)
-								end
-
-								if not self.Disabled then
-									self:SetState(not self.Toggled,true)
-								else
-									self:Paint()
-								end
-								
-								self.OnInput:Fire()
-							end
-						end
-					end)
-				end
-			end)]]
 
 			self:Paint()
 		end
@@ -5706,8 +5354,6 @@ local function main()
 	end)()
 
 	Lib.ColorPicker = (function() -- TODO: Convert to newer class model
-		local funcs = {}
-
 		local function new()
 			local newMt = setmetatable({},{})
 
@@ -5833,7 +5479,6 @@ local function main()
 			newMt.Window = window
 			newMt.Gui = window.Gui
 			local pickerGui = window.Gui.Main
-			local pickerTopBar = pickerGui.TopBar
 			local pickerFrame = pickerGui.Content
 			local colorSpace = pickerFrame.ColorSpaceFrame.ColorSpace
 			local colorStrip = pickerFrame.ColorStrip
@@ -5842,7 +5487,6 @@ local function main()
 			local customColorsFrame = pickerFrame.CustomColors
 			local okButton = pickerFrame.Ok
 			local cancelButton = pickerFrame.Cancel
-			local closeButton = pickerTopBar.Close
 
 			local colorScope = colorSpace.Scope
 			local colorArrow = pickerFrame.ArrowFrame.Arrow
@@ -5867,7 +5511,6 @@ local function main()
 
 			local function updateColor(noupdate)
 				local relativeX, relativeY, relativeStripY = 219 - hue * 219, 199 - sat * 199, 199 - val * 199
-				local hsvColor = Color3.fromHSV(hue, sat, val)
 
 				if noupdate == 2 or not noupdate then
 					hueInput.Text = tostring(math.ceil(359 * hue))
@@ -5928,77 +5571,41 @@ local function main()
 			colorSpace.InputBegan:Connect(function(input) handleInputBegan(input, colorSpaceInput) end)
 			colorStrip.InputBegan:Connect(function(input) handleInputBegan(input, colorStripInput) end)
 
+			-- The up and down arrows beside a number box: one step on the press, then more while it is held
 			local function hookButtons(frame, func)
-				frame.ArrowFrame.Up.InputBegan:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-						local releaseEvent, runEvent
-						local startTime = tick()
-						local pressing = true
-						local startNum = tonumber(frame.Text)
+				local function hook(button, step)
+					button.InputBegan:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+							local releaseEvent
+							local startTime = tick()
+							local pressing = true
+							local startNum = tonumber(frame.Text)
 
-						if not startNum then return end
+							if not startNum then return end
 
-						releaseEvent = user.InputEnded:Connect(function(endInput)
-							if endInput.UserInputType == Enum.UserInputType.MouseButton1 or endInput.UserInputType == Enum.UserInputType.Touch then
-								releaseEvent:Disconnect()
-								pressing = false
+							releaseEvent = user.InputEnded:Connect(function(endInput)
+								if endInput.UserInputType == Enum.UserInputType.MouseButton1 or endInput.UserInputType == Enum.UserInputType.Touch then
+									releaseEvent:Disconnect()
+									pressing = false
+								end
+							end)
+
+							startNum = startNum + step
+							func(startNum)
+							while pressing do
+								if tick() - startTime > 0.3 then
+									startNum = startNum + step
+									func(startNum)
+									startTime = tick()
+								end
+								task.wait(0.1)
 							end
-						end)
-
-						startNum = startNum + 1
-						func(startNum)
-						while pressing do
-							if tick() - startTime > 0.3 then
-								startNum = startNum + 1
-								func(startNum)
-								startTime = tick()
-							end
-							task.wait(0.1)
 						end
-					end
-				end)
-
-				frame.ArrowFrame.Down.InputBegan:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-						local releaseEvent, runEvent
-						local startTime = tick()
-						local pressing = true
-						local startNum = tonumber(frame.Text)
-
-						if not startNum then return end
-
-						releaseEvent = user.InputEnded:Connect(function(endInput)
-							if endInput.UserInputType == Enum.UserInputType.MouseButton1 or endInput.UserInputType == Enum.UserInputType.Touch then
-								releaseEvent:Disconnect()
-								pressing = false
-							end
-						end)
-
-						startNum = startNum - 1
-						func(startNum)
-						while pressing do
-							if tick() - startTime > 0.3 then
-								startNum = startNum - 1
-								func(startNum)
-								startTime = tick()
-							end
-							task.wait(0.1)
-						end
-					end
-				end)
-			end
-
-			--[[local function UpdateBox(TextBox, Value, IsHSV, ...)
-				local number = tonumber(TextBox.Text)
-				if number then
-					number = math.clamp(math.floor(number), 0, Value) / Value
-					local HSV = Color3.fromHSV(func(number))
-					red, green, blue = HSV.R, HSV.G, HSV.B
-					
-					TextBox.Text = tostring(number):sub(4)
-					updateColor(IsHSV)
+					end)
 				end
-			end]]
+				hook(frame.ArrowFrame.Up, 1)
+				hook(frame.ArrowFrame.Down, -1)
+			end
 
 			local function updateHue(str)
 				local num = tonumber(str)
@@ -6197,7 +5804,6 @@ local function main()
 			end
 			local gui = window.Gui
 			local pickerGui = gui.Main
-			local pickerTopBar = pickerGui.TopBar
 			local pickerFrame = pickerGui.Content
 			local numberLine = pickerFrame.NumberLine
 			local numberLineOutlines = pickerFrame.NumberLineOutlines
@@ -6207,9 +5813,8 @@ local function main()
 			local deleteButton = pickerFrame.Delete
 			local resetButton = pickerFrame.Reset
 			local closeButton = pickerFrame.Close
-			local topClose = pickerTopBar.Close
 
-			local points = {{1,0,3},{8,0.05,1},{5,0.6,2},{4,0.7,4},{6,1,4}}
+			local points ={{1,0,3},{8,0.05,1},{5,0.6,2},{4,0.7,4},{6,1,4}}
 			local lines = {}
 			local eLines = {}
 			local beginPoint = points[1]
@@ -6679,9 +6284,8 @@ local function main()
 			local topClose = pickerTopBar.Close
 
 			local user = service.UserInputService
-			local mouse = service.Players.LocalPlayer:GetMouse()
 
-			local colors = {{Color3.new(1,0,1),0},{Color3.new(0.2,0.9,0.2),0.2},{Color3.new(0.4,0.5,0.9),0.7},{Color3.new(0.6,1,1),1}}
+			local colors ={{Color3.new(1,0,1),0},{Color3.new(0.2,0.9,0.2),0.2},{Color3.new(0.4,0.5,0.9),0.7},{Color3.new(0.6,1,1),1}}
 			local resetSequence = nil
 
 			local beginPoint = colors[1]
@@ -6747,7 +6351,6 @@ local function main()
 								local relativeX = (input.Position.X - colorLine.AbsolutePosition.X)
 								if relativeX < 0 then relativeX = 0 end
 								if relativeX > maxSize then relativeX = maxSize end
-								local raw = relativeX / maxSize
 								point[2] = relativeX / maxSize
 								updateInputs(point)
 								cursor.Visible = true
@@ -7267,12 +6870,6 @@ local function main()
 			LastButton = ""
 		}
 		local funcs = {}
-		local tostring = tostring
-
-		local disconnect = function(con)
-			local pos = table.find(con.Signal.Connections,con)
-			if pos then table.remove(con.Signal.Connections,pos) end
-		end
 
 		funcs.Trigger = function(self, item, button, X, Y)
 			if table.find(self.AllowedButtons, button) then
@@ -7293,7 +6890,7 @@ local function main()
 					else
 						self.InputDown = tick()
 
-						local Connection = item.MouseButton1Up:Once(function()
+						item.MouseButton1Up:Once(function()
 							self.InputDown = false
 						end)
 
@@ -7530,6 +7127,7 @@ local function main()
 					end
 				end
 				if #active == 0 then
+					Lib.FindAndRemove(Main.Connections,loop) -- (it is tracked again when it next starts)
 					loop:Disconnect()
 					loop = nil
 				end

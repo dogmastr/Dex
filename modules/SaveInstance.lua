@@ -22,9 +22,7 @@ end
 local function main()
 	local SaveInstance = {}
 	local window
-	local marketplaceService = game:GetService("MarketplaceService")
-	local productInfoSuccess, productInfo = pcall(marketplaceService.GetProductInfo, marketplaceService, game.PlaceId)
-	local fileName = "Place_"..game.PlaceId.."_"..env.parsefile(productInfoSuccess and productInfo.Name or "Unknown").."_{TIMESTAMP}"
+	local fileName = "Place_"..game.PlaceId.."_{TIMESTAMP}" -- the place's name is added when the window first opens
 	local Saving = false
 
 	local DEFAULTS = {
@@ -60,6 +58,26 @@ local function main()
 		window:SetLayoutId("SaveInstance")
 		window:Resize(350, 400)
 		SaveInstance.Window = window
+
+		-- The options as they were left last time (kept with the window layout). The file name is not: it
+		-- names the place.
+		local saved = Main.Layout.Extra("SaveInstance")
+		if type(saved) == "table" and type(saved.args) == "table" then
+			for key, default in pairs(DEFAULTS) do
+				local value = saved.args[key]
+				if type(default) == "table" then
+					if type(value) == "table" then
+						local list = {}
+						for _, item in ipairs(value) do
+							if type(item) == "string" then list[#list+1] = item end
+						end
+						SaveInstanceArgs[key] = list
+					end
+				elseif type(value) == type(default) then
+					SaveInstanceArgs[key] = value
+				end
+			end
+		end
 
 		local content = window.GuiElems.Content
 
@@ -98,6 +116,25 @@ local function main()
 		nameBox.Gui.Parent = content
 		nameBox.TextBox.Text = fileName
 		Lib.Tooltip.attach(nameBox.TextBox, "The saved file's name. {TIMESTAMP} is replaced with the date and time. It goes in your executor's workspace folder.")
+
+		Main.Layout.Providers.SaveInstance = function()
+			return {args = SaveInstanceArgs}
+		end
+
+		-- The place's name is asked for over the web, so only once the window is opened, and from a thread of
+		-- its own. It goes into the file name unless another one was typed in meanwhile.
+		local named = false
+		window.OnActivate:Connect(function()
+			if named then return end
+			named = true
+			task.spawn(function()
+				local marketplaceService = game:GetService("MarketplaceService")
+				local ok, info = pcall(marketplaceService.GetProductInfo, marketplaceService, game.PlaceId)
+				if ok and type(info) == "table" and info.Name and nameBox.TextBox.Text == fileName then
+					nameBox.TextBox.Text = "Place_"..game.PlaceId.."_"..env.parsefile(info.Name).."_{TIMESTAMP}"
+				end
+			end)
+		end)
 
 		local save = Lib.Button.new()
 		save.Text = "Save"

@@ -6,7 +6,7 @@ end
 
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Serializer, Lib
+local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Lib
 local API, RMD
 
 -- Default Settings
@@ -68,11 +68,7 @@ DefaultSettings = (function()
 				Comment = rgb(140,140,140),
 				Note = rgb(229,192,123), -- the Notepad's notes, which sit in comments
 				Keyword = rgb(248,109,124),
-				Error = rgb(255,0,0),
-				FindBackground = rgb(141,118,0),
-				MatchingWord = rgb(85,85,85),
 				BuiltIn = rgb(132,214,247),
-				CurrentLine = rgb(45,50,65),
 				LocalMethod = rgb(253,251,172),
 				LocalProperty = rgb(97,161,241),
 				Nil = rgb(255,198,0),
@@ -95,18 +91,15 @@ DefaultSettings = (function()
 		},
 		Decompiler = {
 			_Recurse = true,
-			DecompilerFallback = "Konstant", --Konstant, Shiny, AdvancedDecompiler
+			DecompilerFallback = "Konstant", --Konstant, AdvancedDecompiler
 			PreferDecompilerFallback = false,
-			ShinyDecompilerPort = 3000,
 		},
 		
-		RemoteBlockWriteAttribute = false, -- writes attribute to remote instance if remote is blocked/unblocked
 		ClassIcon = "NewDark",
 		SettingsVersion = 2, -- bumped when a default colour or value changes (see Main.MigrateSettings)
 		
 		-- What available icons:
 		-- > Vanilla3
-		-- > Old
 		-- > NewDark
 	}
 end)()
@@ -342,28 +335,13 @@ Main = (function()
 			service.Players.LocalPlayer:WaitForChild("PlayerGui")
 	end
 	
+	-- Names a gui so Main.Uninit can find it and puts it where the game's scripts can't see it (gethui, or
+	-- CoreGui after the executor's protect function when it has one).
 	Main.SecureGui = function(gui)
-		--warn("Secured: "..gui.Name)
 		gui.Name = "_ODX_".. Main.GetRandomString()
-		-- service already using cloneref
-		if gethui then
-			gui.Parent = gethui()
-		elseif syn and syn.protect_gui then
-			syn.protect_gui(gui)
-			gui.Parent = service.CoreGui
-		elseif protect_gui then
-			protect_gui(gui)
-			gui.Parent = service.CoreGui
-		elseif protectgui then
-			protectgui(gui)
-			gui.Parent = service.CoreGui
-		else
-			if Main.Elevated then
-				gui.Parent = service.CoreGui
-			else
-				gui.Parent = service.Players.LocalPlayer:WaitForChild("PlayerGui")
-			end
-		end
+		local protect = not gethui and ((syn and syn.protect_gui) or protect_gui or protectgui)
+		if protect then protect(gui) end
+		gui.Parent = Main.GetSecureContainer()
 	end
 
 	Main.GetInitDeps = function()
@@ -391,15 +369,8 @@ Main = (function()
 	end
 
 	Main.LoadModule = function(name)
-		local control
-		if Main.Elevated then -- If you don't have filesystem api then ur outta luck tbh
-			control = EmbeddedModules and EmbeddedModules[name]() -- Offline Modules
-			if not control then Main.Error("Missing Embedded Module: "..name) end
-		else
-			local module = script:WaitForChild("Modules"):WaitForChild(name,2)
-			if not module then Main.Error("CANNOT FIND MODULE "..name) end
-			control = require(module)
-		end
+		local control = EmbeddedModules and EmbeddedModules[name] and EmbeddedModules[name]() -- build.py puts every module in out.lua
+		if not control then Main.Error("Missing Embedded Module: "..name) end
 
 		Main.AppControls[name] = control
 		control.InitDeps(Main.GetInitDeps())
@@ -412,9 +383,10 @@ Main = (function()
 	Main.LoadPluginFile = function(pluginDir)
 		if env.readfile then
 			if isfile(pluginDir) then
-				local preloadedPlugin = loadfile and loadfile(pluginDir) or loadstring(env.readfile(pluginDir))
+				local preloadedPlugin, syntaxError = loadstring(env.readfile(pluginDir), "="..tostring(pluginDir))
+				if not preloadedPlugin then error("it does not compile: "..tostring(syntaxError), 0) end
 				local loadedPlugin = preloadedPlugin()
-				
+
 				local control = loadedPlugin
 				control.InitDeps(Main.GetInitDeps())
 
@@ -475,7 +447,7 @@ Main = (function()
 
 		env.isonmobile = game:GetService("UserInputService").TouchEnabled
 		
-		env.loadstring = (pcall(loadstring,"local a = 1") and loadstring) or (game:GetService("RunService"):IsStudio() and script.Modules:FindFirstChild("Loadstring") and require(script.Modules:FindFirstChild("Loadstring")))
+		env.loadstring = pcall(loadstring,"local a = 1") and loadstring or nil
 
 		-- file
 		env.isfile = isfile
@@ -484,31 +456,25 @@ Main = (function()
 		env.makefolder = makefolder
 		env.listfiles = listfiles
 		env.delfile = delfile
-		env.saveinstance = saveinstance or (function()
-			--warn("No built-in saveinstance exists, using SynSaveInstance and wrapper...")
-			if game:GetService("RunService"):IsStudio() then return function() error("Cannot run in Roblox Studio!") end end
-			local Params = {
-				RepoURL = "https://raw.githubusercontent.com/luau/SynSaveInstance/main/",
-				SSI = "saveinstance",
-			}
-			local s, synsaveinstance = pcall(function()
-				return loadstring(oldgame:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
-			end)
-			if not s then
-				return function() error("saveinstance unavailable") end
+		-- An executor with no saveinstance of its own gets UniversalSynSaveInstance. It is downloaded the first
+		-- time something is saved, and kept on Main so that a reload does not fetch it again.
+		env.saveinstance = saveinstance or function(obj, filepath, options)
+			if not Main.SynSaveInstance then
+				local ok, saver = pcall(function()
+					return loadstring(oldgame:HttpGet("https://raw.githubusercontent.com/luau/SynSaveInstance/main/saveinstance.luau", true), "saveinstance")()
+				end)
+				if not ok or type(saver) ~= "function" then
+					error("the saver (UniversalSynSaveInstance) could not be downloaded: "..tostring(saver), 0)
+				end
+				Main.SynSaveInstance = saver
 			end
 
-			local function wrappedsaveinstance(obj, filepath, options)
-				options["FilePath"] = filepath
-				--options["ReadMe"] = false
-				options["Object"] = obj
-				return synsaveinstance(options)
-			end
-			
-			getgenv().saveinstance = wrappedsaveinstance
-			return wrappedsaveinstance
-		end)()
-		
+			local opts = table.clone(options or {}) -- the caller's table is its settings: leave it as it is
+			opts.FilePath = filepath
+			opts.Object = obj
+			return Main.SynSaveInstance(opts)
+		end
+
 		env.parsefile = function(name)
 			return tostring(name):gsub("[*\\?:<>|/\"]+", ""):sub(1, 175)
 		end
@@ -553,27 +519,35 @@ Main = (function()
 		end
 		
 		-- DECOMPILERS
-		
-		local AdvancedDecompilerCache
-		pcall(function()
-			AdvancedDecompilerCache = loadstring(game:HttpGet("https://raw.githubusercontent.com/"..Main.GitName.."/Advanced-Decompiler-V3/refs/heads/main/init.lua"))()
-		end)
-		
+
+		-- Advanced Decompiler is downloaded the first time it is asked to decompile something, and kept on Main
+		-- so that a reload does not fetch it again. A download that failed is tried again half a minute later.
+		local adTriedAt
+		local function ADDec(...)
+			if not Main.AdvancedDecompiler and (not adTriedAt or os.clock() - adTriedAt > 30) then
+				adTriedAt = os.clock()
+				local ok, result = pcall(function()
+					return loadstring(game:HttpGet("https://raw.githubusercontent.com/"..Main.GitName.."/Advanced-Decompiler-V3/refs/heads/main/init.lua"))()
+				end)
+				if ok and type(result) == "function" then Main.AdvancedDecompiler = result end
+			end
+			if Main.AdvancedDecompiler then return Main.AdvancedDecompiler(...) end
+			return nil, "Advanced Decompiler could not be downloaded"
+		end
+
 		local konstant_last_call = 0
-		
+
+		-- The fallback decompilers return the source, or nil and why there is none (a failure is not a
+		-- decompile: it is not kept in the decompile cache, and the viewer says the reason).
 		local function KonstantDec(...)
 			-- by lovrewe
-			--warn("No built-in decompiler exists, using Konstant decompiler...")
-			--assert(getscriptbytecode, "Exploit not supported.")
 			local API = "http://api.plusgiant5.com"
-
-			local request = env.request
 
 			local function call(konstantType, scriptPath)
 				local success, bytecode = pcall(env.getscriptbytecode, scriptPath)
 
 				if (not success) then
-					return `-- Failed to get script bytecode, error:\n\n--[[\n{bytecode}\n--]]`
+					return nil, "getscriptbytecode failed: "..tostring(bytecode)
 				end
 
 				local time_elapsed = os.clock() - konstant_last_call
@@ -593,7 +567,7 @@ Main = (function()
 				konstant_last_call = os.clock()
 
 				if (httpResult.StatusCode ~= 200) then
-					return `-- Error occurred while requesting Konstant API, error:\n\n--[[\n{httpResult.Body}\n--]]`
+					return nil, "the Konstant API answered "..tostring(httpResult.StatusCode)..": "..tostring(httpResult.Body)
 				else
 					return httpResult.Body
 				end
@@ -605,25 +579,7 @@ Main = (function()
 
 			return konstantDecompile(...)
 		end
-		local ADDec = AdvancedDecompilerCache or function() return "Failed to load Advanced Decompiler" end
 
-		local function ShinyDec(script_instance)
-			if typeof(crypt) ~= "table" then return "-- 'crypt' library is missing!" end
-			local success, result = pcall(function()
-				return game:HttpGet("http://127.0.0.1:"..tostring(Settings.Decompiler.ShinyDecompilerPort))
-			end)
-			if not success then return "-- Shiny decompiler is not active or port is wrong!" end
-
-			local bytecode = getscriptbytecode(script_instance)
-			local encoded = crypt.base64encode(bytecode)
-			return env.request(
-				{
-					Url = "http://127.0.0.1:"..tostring(Settings.Decompiler.ShinyDecompilerPort).."/luau/decompile",
-					Method = "POST",
-					Body = encoded
-				}
-			).Body
-		end
 		env.decompile = function(...)
 			if typeof(decompile) == "function" and Settings.Decompiler.PreferDecompilerFallback == false then
 				return decompile(...)
@@ -634,8 +590,6 @@ Main = (function()
 					return KonstantDec(...)
 				elseif fallbackMode == "AdvancedDecompiler" then
 					return ADDec(...)
-				elseif  fallbackMode == "Shiny" then
-					return ShinyDec(...)
 				end
 			end
 		end
@@ -645,8 +599,7 @@ Main = (function()
 		if typeof(decompile) == "function" then env.decompilers.Builtin = decompile end
 		if typeof(getscriptbytecode) == "function" then
 			env.decompilers.Konstant = KonstantDec
-			env.decompilers.Shiny = ShinyDec
-			if AdvancedDecompilerCache then env.decompilers.AdvancedDecompiler = AdvancedDecompilerCache end
+			env.decompilers.AdvancedDecompiler = ADDec
 		end
 
 		if identifyexecutor then
@@ -704,9 +657,6 @@ Main = (function()
 		end
 	end
 
-
-	--warn(Main.ExportSettings())
-
 	-- A saved settings file pins every value it was written with, so a changed default never reaches
 	-- anyone who has saved. This moves values that still equal an old default to the new one and
 	-- leaves anything that was changed on purpose.
@@ -754,6 +704,7 @@ Main = (function()
 
 				local deserializedData = recur(decoded)
 				merge(Settings, deserializedData)
+				if Settings.Decompiler.DecompilerFallback == "Shiny" then Settings.Decompiler.DecompilerFallback = "Konstant" end -- Shiny is gone
 				Main.MigrateSettings(tonumber(decoded.SettingsVersion) or 1)
 			else
 				warn("failed to decode settings json")
@@ -790,34 +741,21 @@ Main = (function()
 		return saved
 	end
 
-	Main.FetchAPI = function(callbackiflong, callbackiftoolong, XD)
+	-- The API dump: the saved copy if it is of this client's version, else downloaded (several megabytes;
+	-- onSlow is called when that has taken ten seconds).
+	Main.FetchAPI = function(onSlow)
 		local downloaded = false
-		local api,rawAPI
-		if Main.Elevated then
-			rawAPI = Main.ReadCachedDep("dex/rbx_api.dat")
-			task.spawn(function()
-				task.wait(10)
-				if not downloaded and callbackiflong then callbackiflong() end
-
-				task.wait(20) -- 30
-				if not downloaded and callbackiftoolong then callbackiftoolong() end
-
-				task.wait(30) -- 60
-				if not downloaded and XD then XD() end
+		local rawAPI = Main.ReadCachedDep("dex/rbx_api.dat")
+		if not rawAPI then
+			task.delay(10,function()
+				if not downloaded and onSlow then onSlow() end
 			end)
-			-- lmfao async makes it work to load big file
-			rawAPI = rawAPI or game:HttpGet("http://setup.roblox.com/"..Main.RobloxVersion.."-API-Dump.json")
-		else
-			if script:FindFirstChild("API") then
-				rawAPI = require(script.API)
-			else
-				error("NO API EXISTS")
-			end
+			rawAPI = game:HttpGet("http://setup.roblox.com/"..Main.RobloxVersion.."-API-Dump.json")
 		end
 		downloaded = true
-		
+
 		Main.RawAPI = rawAPI
-		api = service.HttpService:JSONDecode(rawAPI)
+		local api = service.HttpService:JSONDecode(rawAPI)
 
 		local classes,enums = {},{}
 		local categoryOrder,seenCategories = {},{}
@@ -929,16 +867,7 @@ Main = (function()
 	end
 
 	Main.FetchRMD = function()
-		local rawXML
-		if Main.Elevated then
-			rawXML = Main.ReadCachedDep("dex/rbx_rmd.dat") or game:HttpGet("https://raw.githubusercontent.com/CloneTrooper1019/Roblox-Client-Tracker/roblox/ReflectionMetadata.xml")
-		else
-			if script:FindFirstChild("RMD") then
-				rawXML = require(script.RMD)
-			else
-				error("NO RMD EXISTS")
-			end
-		end
+		local rawXML = Main.ReadCachedDep("dex/rbx_rmd.dat") or game:HttpGet("https://raw.githubusercontent.com/CloneTrooper1019/Roblox-Client-Tracker/roblox/ReflectionMetadata.xml")
 		Main.RawRMD = rawXML
 		local parsed = Lib.ParseXML(rawXML)
 		local classList = parsed.children[1].children[1].children
@@ -956,6 +885,23 @@ Main = (function()
 		end
 
 		local classes,enums = {},{}
+
+		-- the members listed under a class (kind is "Properties" or "Functions"), by name; a property's order is noted
+		local function readMembers(child, className, kind)
+			for _,member in pairs(child.children) do
+				if member.attrs.class == "ReflectionMetadataMember" and member.children[1].tag == "Properties" then
+					local data = {}
+					readProps(member.children[1].children, data)
+					if kind == "Properties" and data.PropertyOrder then
+						local orders = propertyOrders[className]
+						if not orders then orders = {} propertyOrders[className] = orders end
+						orders[data.Name] = tonumber(data.PropertyOrder)
+					end
+					classes[className][kind][data.Name] = data
+				end
+			end
+		end
+
 		for _,class in pairs(classList) do
 			local className = ""
 			for _,child in pairs(class.children) do
@@ -966,34 +912,9 @@ Main = (function()
 					className = data.Name
 					classes[className] = data
 				elseif child.attrs.class == "ReflectionMetadataProperties" then
-					local members = child.children
-					for _,member in pairs(members) do
-						if member.attrs.class == "ReflectionMetadataMember" then
-							local data = {}
-							if member.children[1].tag == "Properties" then
-								local props = member.children[1].children
-								readProps(props, data)
-								if data.PropertyOrder then
-									local orders = propertyOrders[className]
-									if not orders then orders = {} propertyOrders[className] = orders end
-									orders[data.Name] = tonumber(data.PropertyOrder)
-								end
-								classes[className].Properties[data.Name] = data
-							end
-						end
-					end
+					readMembers(child, className, "Properties")
 				elseif child.attrs.class == "ReflectionMetadataFunctions" then
-					local members = child.children
-					for _,member in pairs(members) do
-						if member.attrs.class == "ReflectionMetadataMember" then
-							local data = {}
-							if member.children[1].tag == "Properties" then
-								local props = member.children[1].children
-								readProps(props, data)
-								classes[className].Functions[data.Name] = data
-							end
-						end
-					end
+					readMembers(child, className, "Functions")
 				end
 			end
 		end
@@ -1080,56 +1001,62 @@ Main = (function()
 		end
 
 		local ti = TweenInfo.new(0.4,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
-		tweenNumber(100,ti,function(val)
-			val = val/200
-			local start = NumberSequenceKeypoint.new(0,0)
-			local a1 = NumberSequenceKeypoint.new(val,0)
-			local a2 = NumberSequenceKeypoint.new(math.min(0.5,val+math.min(0.05,val)),1)
-			if a1.Time == a2.Time then a2 = a1 end
-			local b1 = NumberSequenceKeypoint.new(1-val,0)
-			local b2 = NumberSequenceKeypoint.new(math.max(0.5,1-val-math.min(0.05,val)),1)
-			if b1.Time == b2.Time then b2 = b1 end
-			local goal = NumberSequenceKeypoint.new(1,0)
-			backGradient.Transparency = NumberSequence.new({start,a1,a2,b2,b1,goal})
-			outlinesGradient.Transparency = NumberSequence.new({start,a1,a2,b2,b1,goal})
-		end)
-
-		fastwait(0.4)
-
-		tweenNumber(100,ti,function(val)
-			val = val/166.66
-			local start = NumberSequenceKeypoint.new(0,0)
-			local a1 = NumberSequenceKeypoint.new(val,0)
-			local a2 = NumberSequenceKeypoint.new(val+0.01,1)
-			local goal = NumberSequenceKeypoint.new(1,1)
-			holderGradient.Transparency = NumberSequence.new({start,a1,a2,goal})
-		end)
-
-		tweenS:Create(titleText,ti,{Position = UDim2.new(0,60,0,15), TextTransparency = 0}):Play()
-		tweenS:Create(descText,ti,{Position = UDim2.new(0,20,0,60), TextTransparency = 0}):Play()
-
-		local function rightTextTransparency(obj)
-			tweenNumber(100,ti,function(val)
-				val = val/100
-				local a1 = NumberSequenceKeypoint.new(1-val,0)
-				local a2 = NumberSequenceKeypoint.new(math.max(0,1-val-0.01),1)
-				if a1.Time == a2.Time then a2 = a1 end
-				local start = NumberSequenceKeypoint.new(0,a1 == a2 and 0 or 1)
-				local goal = NumberSequenceKeypoint.new(1,0)
-				obj.Transparency = NumberSequence.new({start,a2,a1,goal})
-			end)
-		end
-		rightTextTransparency(versionGradient)
-		rightTextTransparency(creatorGradient)
-
-		fastwait(0.9)
-
 		local progressTI = TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
 
-		tweenS:Create(statusText,progressTI,{Position = UDim2.new(0,20,0,120), TextTransparency = 0}):Play()
-		tweenS:Create(progressBar,progressTI,{Position = UDim2.new(0,60,0,145), Size = UDim2.new(0,100,0,4)}):Play()
+		-- The window opens with an animation of a second and a half. It runs beside the loading, which does
+		-- not wait for it (opened says when it is over).
+		local opened = false
+		task.spawn(function()
+			tweenNumber(100,ti,function(val)
+				val = val/200
+				local start = NumberSequenceKeypoint.new(0,0)
+				local a1 = NumberSequenceKeypoint.new(val,0)
+				local a2 = NumberSequenceKeypoint.new(math.min(0.5,val+math.min(0.05,val)),1)
+				if a1.Time == a2.Time then a2 = a1 end
+				local b1 = NumberSequenceKeypoint.new(1-val,0)
+				local b2 = NumberSequenceKeypoint.new(math.max(0.5,1-val-math.min(0.05,val)),1)
+				if b1.Time == b2.Time then b2 = b1 end
+				local goal = NumberSequenceKeypoint.new(1,0)
+				backGradient.Transparency = NumberSequence.new({start,a1,a2,b2,b1,goal})
+				outlinesGradient.Transparency = NumberSequence.new({start,a1,a2,b2,b1,goal})
+			end)
 
-		fastwait(0.25)
+			fastwait(0.4)
+
+			tweenNumber(100,ti,function(val)
+				val = val/166.66
+				local start = NumberSequenceKeypoint.new(0,0)
+				local a1 = NumberSequenceKeypoint.new(val,0)
+				local a2 = NumberSequenceKeypoint.new(val+0.01,1)
+				local goal = NumberSequenceKeypoint.new(1,1)
+				holderGradient.Transparency = NumberSequence.new({start,a1,a2,goal})
+			end)
+
+			tweenS:Create(titleText,ti,{Position = UDim2.new(0,60,0,15), TextTransparency = 0}):Play()
+			tweenS:Create(descText,ti,{Position = UDim2.new(0,20,0,60), TextTransparency = 0}):Play()
+
+			local function rightTextTransparency(obj)
+				tweenNumber(100,ti,function(val)
+					val = val/100
+					local a1 = NumberSequenceKeypoint.new(1-val,0)
+					local a2 = NumberSequenceKeypoint.new(math.max(0,1-val-0.01),1)
+					if a1.Time == a2.Time then a2 = a1 end
+					local start = NumberSequenceKeypoint.new(0,a1 == a2 and 0 or 1)
+					local goal = NumberSequenceKeypoint.new(1,0)
+					obj.Transparency = NumberSequence.new({start,a2,a1,goal})
+				end)
+			end
+			rightTextTransparency(versionGradient)
+			rightTextTransparency(creatorGradient)
+
+			fastwait(0.9)
+
+			tweenS:Create(statusText,progressTI,{Position = UDim2.new(0,20,0,120), TextTransparency = 0}):Play()
+			tweenS:Create(progressBar,progressTI,{Position = UDim2.new(0,60,0,145), Size = UDim2.new(0,100,0,4)}):Play()
+
+			fastwait(0.25)
+			opened = true
+		end)
 
 		local failed = false
 		local function setProgress(text,n)
@@ -1141,6 +1068,7 @@ Main = (function()
 		-- A start-up step failed: says why, and stays until it is closed
 		local function fail(message)
 			failed = true
+			while not opened do fastwait() end -- the opening animation still moves the status line: after it
 			progressBar.Visible = false
 			statusText.Position = UDim2.new(0,20,0,92)
 			statusText.Size = UDim2.new(1,-40,0,70)
@@ -1167,6 +1095,7 @@ Main = (function()
 		end
 
 		local function close()
+			while not opened do fastwait() end -- (a start from the saved API can be done before the window has opened)
 			tweenS:Create(titleText,progressTI,{TextTransparency = 1}):Play()
 			tweenS:Create(descText,progressTI,{TextTransparency = 1}):Play()
 			tweenS:Create(versionText,progressTI,{TextTransparency = 1}):Play()
@@ -1302,7 +1231,6 @@ Main = (function()
 		Main.MainGui.OpenButton.Text = val and "Close" or "OpenDex"
 		if val then Main.MainGui.OpenButton.MainFrame.Visible = true end
 		Main.MainGui.OpenButton.MainFrame:TweenSize(val and UDim2.new(0,224,0,200) or UDim2.new(0,0,0,0),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.2,true)
-		--Main.MainGui.OpenButton.BackgroundTransparency = val and 0 or (Lib.CheckMouseInGui(Main.MainGui.OpenButton) and 0 or 0.2)
 		service.TweenService:Create(Main.MainGui.OpenButton,TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{BackgroundTransparency = val and 0 or (Lib.CheckMouseInGui(Main.MainGui.OpenButton) and 0 or 0.2)}):Play()
 
 		if Main.MainGuiMouseEvent then Main.MainGuiMouseEvent:Disconnect() end
@@ -1395,10 +1323,7 @@ Main = (function()
 				service.TweenService:Create(Main.MainGui.OpenButton,TweenInfo.new(0,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),{BackgroundTransparency = Main.MainGuiOpen and 0 or 0.2}):Play()
 			end
 		end)
-		
-		
-		--openButton.MainFrame.BottomFrame.Settings.Visible = false
-		
+
 		openButton.MainFrame.BottomFrame.Settings.MouseButton1Click:Connect(function()
 			if not SettingsWindow.Window.Closed then
 				SettingsWindow.Window:Hide()
@@ -1488,13 +1413,10 @@ Main = (function()
 	Main.SetupFilesystem = function()
 		if not env.writefile or not env.makefolder then return end
 
-		local writefile,makefolder = env.writefile,env.makefolder
+		local makefolder = env.makefolder
 
 		makefolder("dex")
-		makefolder("dex/assets")
-		makefolder("dex/saved")
 		makefolder("dex/plugins")
-		makefolder("dex/ModuleCache")
 		makefolder("dex/annotations")
 	end
 
@@ -1518,7 +1440,7 @@ Main = (function()
 
 	Main.Init = function()
 		Main.Session = {} -- a new one per run: loops of an earlier run compare against it to know they should stop
-		Main.Elevated = pcall(function() local a = game:GetService("CoreGui"):GetFullName() end)
+		Main.Elevated = pcall(function() return game:GetService("CoreGui"):GetFullName() end)
 
 		-- saves new settings if does not exist (settings saved under the old name are carried over)
 		if isfile and not isfile("OpenDexSettings.json") then
@@ -1570,39 +1492,28 @@ Main = (function()
 		
 		-- Fetch version if needed
 		intro.SetProgress("Fetching Roblox Version",0.3)
-		if Main.Elevated then
-			local fileVer = Lib.ReadFile("dex/deps_version.dat")
-			Main.ClientVersion = Version()
-			if fileVer then
-				Main.DepsVersionData = string.split(fileVer,"\n")
-				if Main.LocalDepsUpToDate() then
-					Main.RobloxVersion = Main.DepsVersionData[2]
-				end
+		local fileVer = Lib.ReadFile("dex/deps_version.dat")
+		Main.ClientVersion = Version()
+		if fileVer then
+			Main.DepsVersionData = string.split(fileVer,"\n")
+			if Main.LocalDepsUpToDate() then
+				Main.RobloxVersion = Main.DepsVersionData[2]
 			end
-			
-			Main.RobloxVersion = Main.RobloxVersion or oldgame:HttpGet("https://clientsettings.roblox.com/v2/client-version/WindowsStudio64/channel/LIVE"):match("(version%-[%w]+)")
 		end
+		Main.RobloxVersion = Main.RobloxVersion or oldgame:HttpGet("https://clientsettings.roblox.com/v2/client-version/WindowsStudio64/channel/LIVE"):match("(version%-[%w]+)")
 
 		-- Fetch external deps
 		intro.SetProgress("Fetching API",0.35)
-		API = Main.FetchAPI(
-			function()
-				intro.SetProgress("Fetching API, Please Wait.",0.4)
-			end,
-			function()
-				intro.SetProgress("Fetching API, Please Wait Due To Huge API File To Download.",0.45)
-			end,
-			function()
-				intro.SetProgress("Fetching API, LOL STILL DOWNlOADING? bad wifi xD",0.475)
-			end
-		)
+		API = Main.FetchAPI(function()
+			intro.SetProgress("Fetching API: still downloading (it is a big file)",0.4)
+		end)
 		Lib.FastWait()
 		intro.SetProgress("Fetching RMD",0.5)
 		RMD = Main.FetchRMD()
 		Lib.FastWait()
 
 		-- Save external deps locally if needed
-		if Main.Elevated and env.writefile and not Main.LocalDepsUpToDate() then
+		if env.writefile and not Main.LocalDepsUpToDate() then
 			env.writefile("dex/deps_version.dat",Main.ClientVersion.."\n"..Main.RobloxVersion)
 			env.writefile("dex/rbx_api.dat",Main.RawAPI)
 			env.writefile("dex/rbx_rmd.dat",Main.RawRMD)
@@ -1648,7 +1559,7 @@ Main = (function()
 						table.insert(Main.Plugins, moduleData)
 					end)
 					if not s then
-						warn("Failed to load plugin '"..tostring(pluginDir).."': "..tostring(err))
+						Main.Notify("The plugin "..tostring(pluginDir).." did not load: "..tostring(err),"error")
 					end
 				end
 			end	
@@ -1674,6 +1585,10 @@ Main = (function()
 	
 	Main.Uninit = function()
 		Main.Session = nil
+		-- a module that has changed the running game (hooks on its functions, work in the background) undoes that
+		for _, app in pairs(Apps) do
+			if type(app) == "table" and type(app.Unload) == "function" then pcall(app.Unload) end
+		end
 		for _, conn in pairs(Main.Connections) do
 			conn:Disconnect()
 		end

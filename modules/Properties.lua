@@ -7,7 +7,7 @@
 -- Common Locals
 local Main,Lib,Apps,Settings -- Main Containers
 local Explorer -- Major Apps
-local API,RMD,service,create -- Main Locals
+local API,RMD,env,service,create -- Main Locals
 
 local function initDeps(data)
 	Main = data.Main
@@ -17,6 +17,7 @@ local function initDeps(data)
 
 	API = data.API
 	RMD = data.RMD
+	env = data.env
 	service = data.service
 	create = data.create
 end
@@ -48,7 +49,6 @@ local function main()
 	Properties.EntryIndent = 16
 	Properties.EntryOffset = 4
 	Properties.NameWidthCache = {}
-	Properties.SubPropCache = {}
 	Properties.ClassLists = {}
 	Properties.SearchText = ""
 
@@ -400,7 +400,14 @@ local function main()
 
 	-- Fetches the properties to be displayed based on the explorer selection
 	Properties.ShowExplorerProps = function()
-		local maxConflictCheck = Settings.Properties.MaxConflictCheck
+		-- With the window closed, minimised or in a hidden side panel there is nothing to draw into: the
+		-- selection is read when it comes back into view (see Properties.Init).
+		if window and not window:IsContentVisible() then
+			Properties.Stale = true
+			return
+		end
+		Properties.Stale = false
+
 		local sList = Explorer.Selection.List
 		local foundClasses = {}
 		local propCount = 1
@@ -489,7 +496,6 @@ local function main()
 		-- Find conflicts and get auto-update instances
 		Properties.ClassLists = classLists
 		Properties.ComputeConflicts()
-		--warn("CONFLICT",tick()-start)
 		if #props > 0 then
 			props[#props+1] = Properties.AddAttributeProp
 		end
@@ -728,7 +734,6 @@ local function main()
 				local sizeX = service.TextService:GetTextSize(dispName,14,Enum.Font.SourceSans,Vector2.new(math.huge,20)).X
 
 				fullNameFrame.TextLabel.Text = dispName
-				--fullNameFrame.Position = UDim2.new(0,Properties.EntryIndent*(prop.Depth or 1) + Properties.EntryOffset,0,23*(index-1))
 				fullNameFrame.Size = UDim2.new(0,sizeX + 4,0,22)
 				fullNameFrame.Visible = true
 				Properties.FullNameFrameIndex = index
@@ -781,6 +786,14 @@ local function main()
 		newEntry.RowButton.MouseButton1Click:Connect(function()
 			Properties.DisplayAddAttributeWindow()
 		end)
+
+		-- Right-click on a property (its name, or its value, which sits on top as a button): the menu for it
+		local function rowMenu()
+			local prop = rowProp()
+			if prop and not prop.CategoryName and not prop.SpecialRow then Properties.DisplayPropContext(prop) end
+		end
+		newEntry.MouseButton2Click:Connect(rowMenu)
+		valueFrame.ValueBox.MouseButton2Click:Connect(rowMenu)
 
 		newEntry.EditAttributeButton.MouseButton1Down:Connect(function()
 			local prop = rowProp()
@@ -914,6 +927,54 @@ local function main()
 			end)()
 			Properties.Refresh()
 		end
+	end
+
+	-- The menu of a property's row: its value, name and path to the clipboard, and, for a property that
+	-- holds an object, that object selected in the Explorer. With several objects selected it is about the
+	-- first one that has the property.
+	Properties.DisplayPropContext = function(prop)
+		local context = Properties.PropContext
+		if not context then
+			context = Lib.ContextMenu.new()
+			context.Iconless = true
+			context.Width = 190
+			Properties.PropContext = context
+		end
+		context:Clear()
+
+		local obj = Properties.FindFirstObjWhichIsA(prop.Class)
+		local value = Properties.GetPropVal(prop,obj)
+		local noClipboard = env.setclipboard == nil and "Your executor has no setclipboard" or nil
+		local function copy(text)
+			env.setclipboard(text)
+			Main.Notify("Copied "..(#text > 60 and (text:sub(1,57).."...") or text),"success")
+		end
+		local function item(name,reason,onClick)
+			context:Add({Name = name, Disabled = reason ~= nil, Reason = reason, OnClick = onClick})
+		end
+
+		-- the property as it is written in code: Size, Size.X, :GetAttribute("Coins")
+		local access = prop.IsAttribute and (':GetAttribute("'..Lib.FormatLuaString(prop.AttributeName)..'")') or ("."..prop.Name)
+		access = access..(prop.SubName or "")
+
+		item("Copy Value",noClipboard or (value == nil and "It has no value") or nil,function()
+			copy(typeof(value) == "Instance" and value:GetFullName() or Properties.ValueToString(prop,value))
+		end)
+		item("Copy Value as Code",noClipboard or (value == nil and "It has no value") or nil,function()
+			copy((Lib.ToLua(value)))
+		end)
+		item("Copy Name",noClipboard,function()
+			copy(prop.IsAttribute and prop.AttributeName or (prop.Name..(prop.SubName or "")))
+		end)
+		item("Copy Path",noClipboard or (obj == nil and "Nothing is selected") or nil,function()
+			copy(Explorer.GetInstancePath(obj)..access)
+		end)
+		if typeof(value) == "Instance" then
+			context:AddDivider()
+			item("Select in Explorer",nil,function() Explorer.SelectObj(value) end)
+		end
+
+		context:Show()
 	end
 
 	Properties.DisplayAttributeContext = function(prop)
@@ -1239,7 +1300,6 @@ local function main()
 	end
 
 	Properties.DisplayProp = function(prop,entryIndex)
-		local propName = prop.Name
 		local typeData = prop.ValueType
 		local typeName = typeData.Name
 		local tags = prop.Tags
@@ -1249,7 +1309,6 @@ local function main()
 		local UDim2 = UDim2
 
 		local guiElems = entryData.GuiElems
-		local valueFrame = guiElems.ValueFrame
 		local valueBox = guiElems.ValueBox
 		local colorButton = guiElems.ColorButton
 		local colorPreview = guiElems.ColorPreview
@@ -1356,7 +1415,6 @@ local function main()
 		local maxX = propsFrame.AbsoluteSize.X
 		local valueWidth = math.max(Properties.MinInputWidth,maxX-Properties.ViewWidth)
 		local inputPropVisible = false
-		local isa = game.IsA
 		local UDim2 = UDim2
 		local stringSplit = string.split
 		local scaleType = Settings.Properties.ScaleType
@@ -1383,7 +1441,6 @@ local function main()
 			local expand = guiElems.Expand
 			local valueBox = guiElems.ValueBox
 			local propNameBox = guiElems.PropName
-			local rightButton = guiElems.RightButton
 			local editAttributeButton = guiElems.EditAttributeButton
 			local toggleAttributes = guiElems.ToggleAttributes
 
@@ -1568,7 +1625,6 @@ local function main()
 		local attributeName = prop.AttributeName
 		local rootTypeData = prop.RootType
 		local rootTypeName = rootTypeData and rootTypeData.Name
-		local fullName = propFullName(prop)
 		local Vector3 = Vector3
 		local failure -- the first error, if any object refused the value
 
@@ -1792,7 +1848,6 @@ local function main()
 			{15,"Frame",{BackgroundColor3=Color3.new(0.86274510622025,0.86274510622025,0.86274510622025),BorderSizePixel=0,Parent={12},Position=UDim2.new(0,6,0,7),Size=UDim2.new(0,5,0,1),}},
 			{16,"TextButton",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Font=3,Name="ValueBox",Parent={7},Position=UDim2.new(0,4,0,0),Size=UDim2.new(1,-8,1,0),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,TextTransparency=0.10000000149012,TextTruncate=1,TextXAlignment=0,}},
 			{17,"TextButton",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="RightButton",Parent={7},Position=UDim2.new(1,-20,0,0),Size=UDim2.new(0,20,0,22),Text="...",TextColor3=Color3.new(1,1,1),TextSize=14,Visible=false,}},
-			{18,"TextButton",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="SettingsButton",Parent={7},Position=UDim2.new(1,-20,0,0),Size=UDim2.new(0,20,0,22),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,Visible=false,}},
 			{19,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Name="SoundPreview",Parent={7},Size=UDim2.new(1,0,1,0),Visible=false,}},
 			{20,"TextButton",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="ControlButton",Parent={19},Size=UDim2.new(0,20,0,22),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
 			{21,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5642383285",ImageRectOffset=Vector2.new(144,16),ImageRectSize=Vector2.new(16,16),Name="Icon",Parent={20},Position=UDim2.new(0,2,0,3),ScaleType=4,Size=UDim2.new(0,16,0,16),}},
@@ -1830,8 +1885,6 @@ local function main()
 			{5,"UICorner",{CornerRadius=UDim.new(0,2),Parent={3},}},
 			{6,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Reset",Parent={3},Position=UDim2.new(1,-17,0,1),Size=UDim2.new(0,16,0,16),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
 			{7,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5034718129",ImageColor3=Color3.new(0.39215686917305,0.39215686917305,0.39215686917305),Parent={6},Size=UDim2.new(0,16,0,16),}},
-			{8,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Refresh",Parent={2},Position=UDim2.new(1,-20,0,1),Size=UDim2.new(0,18,0,18),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,Visible=false,}},
-			{9,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5642310344",Parent={8},Position=UDim2.new(0,3,0,3),Size=UDim2.new(0,12,0,12),}},
 			{10,"Frame",{BackgroundColor3=Color3.new(0.15686275064945,0.15686275064945,0.15686275064945),BorderSizePixel=0,Name="ScrollCorner",Parent={1},Position=UDim2.new(1,-16,1,-16),Size=UDim2.new(0,16,0,16),Visible=false,}},
 			{11,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,23),Size=UDim2.new(1,0,1,-23),}},
 		})
@@ -1866,16 +1919,18 @@ local function main()
 				Properties.Refresh()
 			end
 		end)
-		window.OnActivate:Connect(function()
-			Properties.UpdateView()
-			Properties.Update()
-			Properties.Refresh()
-		end)
-		window.OnRestore:Connect(function()
-			Properties.UpdateView()
-			Properties.Update()
-			Properties.Refresh()
-		end)
+		-- The window came into view: a selection made while it was out of it is read now
+		local function shown()
+			if Properties.Stale then
+				Properties.ShowExplorerProps()
+			else
+				Properties.UpdateView()
+				Properties.Update()
+				Properties.Refresh()
+			end
+		end
+		window.OnActivate:Connect(shown)
+		window.OnRestore:Connect(shown)
 
 		-- Init scrollbars
 		scrollV = Lib.ScrollBar.new()		

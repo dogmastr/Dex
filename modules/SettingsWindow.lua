@@ -6,19 +6,15 @@
 ]]
 
 -- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties -- Major Apps
+local Main,Lib,Settings -- Main Containers
 
 local function initDeps(data)
 	Main = data.Main
 	Lib = data.Lib
-	Apps = data.Apps
 	Settings = data.Settings
 end
 
 local function initAfterMain()
-	Explorer = Apps.Explorer
-	Properties = Apps.Properties
 end
 
 local function main()
@@ -102,7 +98,7 @@ local function main()
 			Lib.Window.SetTransparency(v)
 		end,{Min = 0,Max = 0.8,Step = 0.05,Default = defaults.Window.Transparency,Description = "How see-through window backgrounds are. Windows change as you drag; the rows of the Explorer and Properties follow after a restart."})
 
-		form:AddDropdown("Class icons",{"Old","NewDark","Vanilla3"},Settings.ClassIcon,function(v)
+		form:AddDropdown("Class icons",{"NewDark","Vanilla3"},Settings.ClassIcon,function(v)
 			Settings.ClassIcon = v
 		end,{Default = defaults.ClassIcon,Width = 100,Description = "The icon set shown in the Explorer. Needs a restart."})
 
@@ -127,10 +123,6 @@ local function main()
 		checkbox("Add new matches to a search","Explorer","AutoUpdateSearch","While a search is showing, list new objects that match it as they appear. Needs a restart.")
 
 		checkbox("Fit width to names","Explorer","UseNameWidth","Scroll sideways as far as the longest name instead of cutting long names off. Needs a restart.")
-
-		form:AddCheckbox("Mark blocked remotes",Settings.RemoteBlockWriteAttribute,function(v)
-			Settings.RemoteBlockWriteAttribute = v
-		end,{Default = defaults.RemoteBlockWriteAttribute,Description = "Set the attribute IsBlocked on a remote when you block or unblock it. The game's own scripts can read that attribute."})
 
 		-- Properties
 		form:AddHeading("Properties")
@@ -163,13 +155,9 @@ local function main()
 		form:AddHeading("Decompiler")
 		form:AddNote("If the executor can't decompile, this fallback is used. The fallbacks need getscriptbytecode.")
 
-		form:AddDropdown("Decompiler fallback",{"Konstant","AdvancedDecompiler","Shiny"},Settings.Decompiler.DecompilerFallback,function(v)
+		form:AddDropdown("Decompiler fallback",{"Konstant","AdvancedDecompiler"},Settings.Decompiler.DecompilerFallback,function(v)
 			Settings.Decompiler.DecompilerFallback = v
 		end,{Default = defaults.Decompiler.DecompilerFallback,Width = 130})
-
-		form:AddNumber("Shiny decompiler port",Settings.Decompiler.ShinyDecompilerPort,function(v)
-			Settings.Decompiler.ShinyDecompilerPort = v
-		end,{Integer = true,Min = 1,Max = 65535,Width = 60,Default = defaults.Decompiler.ShinyDecompilerPort,Description = "The local port the Shiny decompiler listens on."})
 
 		checkbox("Prefer fallback decompiler","Decompiler","PreferDecompilerFallback","Use the fallback even when the executor has its own decompiler.")
 

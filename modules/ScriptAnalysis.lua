@@ -2760,6 +2760,39 @@ local function main()
 		end
 	end
 
+	-- How many times one of the suspicious words stands in the text as a word of its own: with no letter
+	-- next to it, or where a small letter meets a capital (kickPlayer and isBanned count, kicker does not).
+	-- Looks for each word in the text; splitting the whole text into its words took most of a digest's time.
+	local function countWords(src)
+		local byte, find = string.byte, string.find
+		local low = src:lower()
+		local function small(c) return c ~= nil and c >= 97 and c <= 122 end
+		local function capital(c) return c ~= nil and c >= 65 and c <= 90 end
+		local n = 0
+		for word in pairs(suspicious) do
+			local at = 1
+			while true do
+				local s, e = find(low, word, at, true)
+				if not s then break end
+				at = s + 1
+				local before, first, last, after = byte(src, s - 1), byte(src, s), byte(src, e), byte(src, e + 1)
+				local starts = not (small(before) or capital(before)) or (small(before) and capital(first))
+				local ends = not (small(after) or capital(after)) or (small(last) and capital(after))
+				if starts and ends then
+					local whole = true -- (a small letter and then a capital inside it would make it two words)
+					for i = s, e - 1 do
+						if small(byte(src, i)) and capital(byte(src, i + 1)) then
+							whole = false
+							break
+						end
+					end
+					if whole then n += 1 end
+				end
+			end
+		end
+		return n
+	end
+
 	-- One parse boiled down to what pages about the whole game need, so the parse (big) can be dropped:
 	-- lines, size, requires {line, path}, remotes (as Remotes, without the parse), named functions
 	-- {name, short, line, params}, uses of required modules {req (index into requires), member, line, call,
@@ -2810,10 +2843,7 @@ local function main()
 			prev = pos
 		end
 		longest = math.max(longest, #src - prev)
-		local words = 0
-		for w in (src:gsub("(%l)(%u)", "%1 %2")):lower():gmatch("%a+") do
-			if suspicious[w] then words += 1 end
-		end
+		local words = countWords(src)
 		local sig = {
 			functions = #R.functions - 1,
 			fire = counts.remote or 0, listen = counts.listen or 0, http = counts.http or 0,

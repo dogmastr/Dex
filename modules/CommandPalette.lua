@@ -7,13 +7,12 @@
 	Up/Down choose, Enter runs, Esc closes.
 ]]
 -- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
+local Main,Lib,Settings -- Main Containers
 local service,createSimple -- Main Locals
 
 local function initDeps(data)
 	Main = data.Main
 	Lib = data.Lib
-	Apps = data.Apps
 	Settings = data.Settings
 
 	service = data.service
@@ -37,7 +36,9 @@ local function main()
 		return Settings.Theme[key]
 	end
 
-	-- Every command from every provider. Disabled can be true or the reason (a string).
+	-- Every command from every provider. Disabled can be true or the reason (a string). Lower and Hay are
+	-- what a search looks in, made once here: a game has thousands of entries (a script each, and every
+	-- function of the scripts that were parsed) and every key typed looks at all of them.
 	local function collect()
 		local all = {}
 		for _,provider in ipairs(Main.CommandProviders) do
@@ -45,9 +46,13 @@ local function main()
 			if ok and type(commands) == "table" then
 				for _,c in ipairs(commands) do
 					if c.Name and c.Run then
+						local category = c.Category or ""
+						local lower = c.Name:lower()
 						all[#all+1] = {
 							Name = c.Name,
-							Category = c.Category or "",
+							Category = category,
+							Lower = lower,
+							Hay = category:lower().." "..lower,
 							Run = c.Run,
 							Disabled = c.Disabled and true or false,
 							Reason = type(c.Disabled) == "string" and c.Disabled or nil,
@@ -62,8 +67,7 @@ local function main()
 
 	-- Lower is better: every word must be in the category or name; names that start with it come first.
 	local function score(entry,terms)
-		local name = entry.Name:lower()
-		local haystack = entry.Category:lower().." "..name
+		local name,haystack = entry.Lower,entry.Hay
 		local total = 0
 		for _,term in ipairs(terms) do
 			if not haystack:find(term,1,true) then return nil end
@@ -201,13 +205,18 @@ local function main()
 
 		shown = {}
 		if #terms == 0 then
+			-- the commands run lately first, then the rest in the order they were given
+			local listed = {}
 			for _,name in ipairs(recent) do
 				for _,e in ipairs(entries) do
-					if e.Name == name then shown[#shown+1] = e end
+					if e.Name == name then
+						shown[#shown+1] = e
+						listed[e] = true
+					end
 				end
 			end
 			for _,e in ipairs(entries) do
-				if not table.find(shown,e) then shown[#shown+1] = e end
+				if not listed[e] then shown[#shown+1] = e end
 			end
 		else
 			local scored = {}

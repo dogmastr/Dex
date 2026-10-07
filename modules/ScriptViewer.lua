@@ -44,9 +44,6 @@ if identifyexecutor then
 	local name,ver = identifyexecutor()
 	executorName = name
 	executorVersion = ver and tostring(ver) or "???"
-elseif game:GetService("RunService"):IsStudio() then
-	executorName = "Studio"
-	executorVersion = version()
 end
 
 local function getPath(obj)
@@ -78,24 +75,24 @@ local function main()
 	-- AnState, Path, ViewY, CursorX/Y}
 	local tabs, activeTab = {}, nil
 	local backStack, fwdStack = {}, {}
-	local tabStrip, findBar, findLabel, findBox, findCount, caseBtn, navButtons
-	local findOpen, findMode, findCase = false, "find", false
-	local matches, matchIdx = {}, 0
+	local tabStrip, navButtons
 	local renameTarget, flowRange, lastSyncLine
 
-	-- The columns (relayout places them) and what they show. flowFn/flowR are what the graph pane
-	-- shows (a function and the analysis it came from); followFn is the function the cursor was last
-	-- in, so the pane only switches when the cursor moves to a different function and a function
-	-- opened by hand stays up until then.
-	local toolbar, leftCol, flowPane, flowDivider, sideFrame, statusBar
+	-- What the graph pane shows. flowFn/flowR are a function and the analysis it came from; followFn
+	-- is the function the cursor was last in, so the pane only switches when the cursor moves to a
+	-- different function and a function opened by hand stays up until then.
 	local flowOpen, flowRatio, flowMode = true, 0.45, "flow"
 	local flowFn, flowR, followFn
 	local SPLIT_W, MIN_PANE, SIDE_MIN = 4, 200, 260
 
 	-- What getting around needs that is not a local of its own (Luau allows 200 in a function and main()
 	-- is close): the navigator's width and what it is showing, the lists that were asked for, the tabs
-	-- that were closed, where the cursor is for the toolbar, and the functions that go with them.
-	local Nav = {W = 320, last = {}, scopeOf = {}, chips = {}, rowInfo = {}, jumps = {}, folded = {}, closed = {}, made = 0, hits = 0}
+	-- that were closed, where the cursor is for the toolbar, and the functions that go with them. Also
+	-- the columns relayout places (toolbar, leftCol, flowPane, flowDivider, sideFrame, statusBar) and the
+	-- find bar: its parts (findBar, findLabel, findBox, findCount, caseBtn), whether it is open, what it
+	-- is asking for (findMode: "find", "line", "rename" or "note"), and the matches of a find.
+	local Nav = {W = 320, last = {}, scopeOf = {}, chips = {}, rowInfo = {}, jumps = {}, folded = {}, closed = {}, made = 0, hits = 0,
+		findOpen = false, findMode = "find", findCase = false, matches = {}, matchIdx = 0}
 
 	-- The navigator has three scopes, each with its pages. sideTab is the page that is showing. A page
 	-- builds itself (rootPages, defined with the pages below) and has a stack of pages opened from it,
@@ -128,76 +125,6 @@ local function main()
 	local function currentScript()
 		local tab = tabs[activeTab]
 		return tab and tab.Kind == "script" and not tab.Failed and tab.Script or nil
-	end
-
-	ScriptViewer.DumpFunctions = function(scr)
-		ScriptViewer.ViewScript(scr) -- the dump is appended to that script's text, so make sure its tab is the one on screen
-		-- thanks King.Kevin#6025 you'll obviously be credited (no discord tag since that can easily be impersonated)
-		local original = ("\n-- // Function Dumper made by King.Kevin\n-- // Script Path: %s\n\n--[["):format(getPath(scr))
-		local dumpParts = {}
-		local seen = {}
-		local dumpTable
-
-		local function add(str, indentation, new_line)
-			dumpParts[#dumpParts + 1] = ("%s%s%s"):format(string.rep("		", indentation), tostring(str), new_line ~= false and "\n" or "")
-		end
-
-		local function functionName(func)
-			local n = debug.info(func, "n")
-			return (n and n ~= "") and n or "Unknown Name"
-		end
-
-		-- One "number [type] = value" line. A table is followed by its fields, a table seen before is only noted.
-		local function dumpEntry(number, key, value, indent)
-			if type(value) == "function" then
-				add(("%d [function] = %s"):format(number, functionName(value)), indent)
-			elseif type(value) == "table" then
-				if not seen[value] then
-					seen[value] = true
-					add(("%d [table]:"):format(number), indent)
-					dumpTable(value, indent + 1, key)
-				else
-					add(("%d [table] (Recursive table detected)"):format(number), indent)
-				end
-			else
-				add(("%d [%s] = %s"):format(number, tostring(typeof(value)), tostring(value)), indent)
-			end
-		end
-
-		dumpTable = function(input, indent, index)
-			indent = indent < 0 and 0 or indent
-			add(("%s [%s] %s"):format(tostring(index), tostring(typeof(input)), tostring(input)), indent - 1)
-			local count = 0
-			for key, value in pairs(input) do
-				count = count + 1
-				dumpEntry(count, key, value, indent)
-			end
-		end
-
-		local function dumpFunction(input)
-			add(("\nFunction Dump: %s"):format(functionName(input)), 0)
-			add(("\nFunction Upvalues: %s"):format(functionName(input)), 0)
-			for index, upvalue in pairs(env.getupvalues(input)) do
-				dumpEntry(index, index, upvalue, 1)
-			end
-			add(("\nFunction Constants: %s"):format(functionName(input)), 0)
-			for index, constant in pairs(env.getconstants(input)) do
-				dumpEntry(index, index, constant, 1)
-			end
-		end
-
-		for _, _function in pairs(env.getgc()) do
-			if typeof(_function) == "function" and getfenv(_function).script == scr then
-				dumpFunction(_function)
-				add("\n" .. ("="):rep(100), 0, false)
-			end
-		end
-		local source = codeFrame:GetText()
-
-		if #dumpParts > 0 then source = source .. original .. table.concat(dumpParts) .. "]]" end
-		codeFrame:SetText(source)
-
-		window:Show()
 	end
 
 	----------------------------------------------------------------------------------------------
@@ -281,7 +208,7 @@ local function main()
 
 	setSideOpen = function(on, quiet)
 		sideOpen = on
-		sideFrame.Visible = on
+		Nav.sideFrame.Visible = on
 		relayout()
 		if on and not quiet then renderEdit() end
 	end
@@ -995,6 +922,15 @@ local function main()
 			end)
 		end
 
+		-- Takes a hook off a function again: the executor's restorefunction, or the original put back over it
+		local function unhook(func, old)
+			if env.restorefunction then
+				pcall(env.restorefunction, func)
+			elseif old and env.hookfunction then
+				pcall(env.hookfunction, func, old)
+			end
+		end
+
 		local function logCall(rec, ...)
 			local n = select("#", ...)
 			local args = {}
@@ -1054,6 +990,7 @@ local function main()
 						local okCond, pass = pcall(rec.Cond, args, rec.Hits)
 						if okCond and not pass then return old(...) end -- not a call the user asked about
 					end
+					rec.Last = args -- (its page can copy them as code)
 
 					local okLog, logged = pcall(logCall, rec, ...)
 					if not okLog then logged = nil end
@@ -1088,11 +1025,7 @@ local function main()
 			local rec = traces[func]
 			if not rec then return end
 			rec.Active = false -- the hook stays installed but passes calls straight through
-			if env.restorefunction then
-				pcall(env.restorefunction, func)
-			elseif rec.Old and env.hookfunction then
-				pcall(env.hookfunction, func, rec.Old)
-			end
+			unhook(func, rec.Old)
 		end
 
 		-- Compiles a box's text into rec[field] (nothing, for an empty box) and remembers the text.
@@ -1128,6 +1061,14 @@ local function main()
 					if not on and rec.Waiting then rec.Waiting.Go = true end
 					renderEdit()
 				end)
+				if rec.Last then
+					order = order + 1
+					Tools.action(order, "Copy the arguments of the last call, as code", function()
+						if not env.setclipboard then toast("Your executor has no setclipboard", "warn") return end
+						env.setclipboard((Lib.ToLua({table.unpack(rec.Last, 1, rec.Last.n)})))
+						toast("Copied")
+					end)
+				end
 				local wait = rec.Waiting
 				if wait then
 					order = order + 1
@@ -1609,11 +1550,6 @@ local function main()
 
 		Live.draw = drawMarks
 
-		-- Whether there is a script to look at and an executor that can
-		local function available()
-			return env.getgc ~= nil and env.getconstants ~= nil and currentScript() ~= nil
-		end
-
 		-- A few times a second: starts the first scan of a script that has none. Scans after that are asked for
 		-- (Live.rescan), because one forgets what was edited.
 		Live.tick = function()
@@ -2056,9 +1992,6 @@ local function main()
 		end}
 		Live.showTaps = function() openPage("taps") end
 
-		Live.tapCount = function() return #tap.Log end
-		Live.tapOn = function() return tap.On end
-
 		----------------------------------------------------------------------------------------------
 		-- Coverage: count the calls of the script's running functions to see which ones ever run
 		----------------------------------------------------------------------------------------------
@@ -2070,13 +2003,7 @@ local function main()
 
 		Live.toggleCoverage = function()
 			if coverage.On then
-				for func,rec in pairs(coverage.Hooks) do
-					if env.restorefunction then
-						pcall(env.restorefunction, func)
-					elseif rec.Old then
-						pcall(env.hookfunction, func, rec.Old)
-					end
-				end
+				for func,rec in pairs(coverage.Hooks) do unhook(func, rec.Old) end
 				coverage.Hooks, coverage.On = {}, false
 				toast("No longer counting calls")
 				return
@@ -2214,7 +2141,15 @@ local function main()
 		Live.showTrace = function() openPage("trace") end
 		Live.showWatch = function() openPage("watch") end
 		Live.traceFunction = traceFunction
-		Live.watchCount = function() return #watches end
+		-- OpenDex is being reloaded or closed: every hook this viewer put on the game's functions comes off
+		-- (tracepoints, call counters, the taps). A call that is stopped at a tracepoint goes on.
+		Live.unload = function()
+			for func in pairs(traces) do stopTrace(func) end
+			for func,rec in pairs(coverage.Hooks) do unhook(func, rec.Old) end
+			coverage.Hooks, coverage.On = {}, false
+			for _,hook in pairs(tap.Hooks) do unhook(hook.Func, hook.Old) end
+			tap.Hooks, tap.On, tap.Installed = {}, false, false
+		end
 		-- how many functions are being traced
 		Live.traceCount = function()
 			local count = 0
@@ -2433,7 +2368,7 @@ local function main()
 			if tab and tab.Bookmarks then
 				for line in pairs(tab.Bookmarks) do map[line - 1] = MARKER_COLORS.bookmark end
 			end
-			for i, m in ipairs(matches) do
+			for i, m in ipairs(Nav.matches) do
 				if i > 400 then break end
 				map[m[1] - 1] = MARKER_COLORS.find
 			end
@@ -2688,7 +2623,7 @@ local function main()
 				codeFrame.Lines[c.line] = line..NOTE_MARK..c.text
 			end
 		end
-		codeFrame:ProcessTextChange(true)
+		codeFrame:ProcessTextChange()
 	end
 
 	-- Compares a script with the decompile kept from the last time it was opened here: when it differs,
@@ -2772,7 +2707,7 @@ local function main()
 			codeFrame.Lines[line] = codeFrame.Lines[line]..NOTE_MARK..text
 		end
 		tab.Ann.comments = kept
-		codeFrame:ProcessTextChange(true)
+		codeFrame:ProcessTextChange()
 		saveAnn(tab)
 		marksChanged()
 	end
@@ -2802,7 +2737,7 @@ local function main()
 				codeFrame.Lines[line] = text:sub(1, col)..newName..text:sub(col + #R.tv[toks[i]] + 1)
 			end
 		end
-		codeFrame:ProcessTextChange(true)
+		codeFrame:ProcessTextChange()
 
 		recordRename(tab, R, t.Sym, newName)
 		saveAnn(tab)
@@ -2823,9 +2758,9 @@ local function main()
 			Nav.tabList.Position = UDim2.new(1,-22,0,top)
 			top = top + TAB_H
 		end
-		findBar.Visible = findOpen
-		if findOpen then
-			findBar.Position = UDim2.new(0,0,0,top)
+		Nav.findBar.Visible = Nav.findOpen
+		if Nav.findOpen then
+			Nav.findBar.Position = UDim2.new(0,0,0,top)
 			top = top + FIND_H
 		end
 		codeFrame.Frame.Position = UDim2.new(0,0,0,top)
@@ -2836,23 +2771,23 @@ local function main()
 		local r = flowOpen and flowRatio or 0
 		local bodyH = -(TOOL_H + STATUS_H) -- between the toolbar and the status bar
 
-		sideFrame.Position = UDim2.new(0,0,0,TOOL_H)
-		sideFrame.Size = UDim2.new(0,Nav.W,1,bodyH)
+		Nav.sideFrame.Position = UDim2.new(0,0,0,TOOL_H)
+		Nav.sideFrame.Size = UDim2.new(0,Nav.W,1,bodyH)
 		Nav.sideDivider.Visible = sideOpen
 		Nav.sideDivider.Position = UDim2.new(0,Nav.W,0,TOOL_H)
 		Nav.sideDivider.Size = UDim2.new(0,SPLIT_W,1,bodyH)
-		leftCol.Position = UDim2.new(0,left,0,TOOL_H)
-		leftCol.Size = UDim2.new(1 - r,-math.ceil(left * (1 - r)),1,bodyH)
-		flowPane.Visible, flowDivider.Visible = flowOpen, flowOpen
-		flowDivider.Position = UDim2.new(1 - r,math.floor(left * r),0,TOOL_H)
-		flowDivider.Size = UDim2.new(0,SPLIT_W,1,bodyH)
-		flowPane.Position = UDim2.new(1 - r,math.floor(left * r) + SPLIT_W,0,TOOL_H)
-		flowPane.Size = UDim2.new(r,-math.floor(left * r) - SPLIT_W,1,bodyH)
+		Nav.leftCol.Position = UDim2.new(0,left,0,TOOL_H)
+		Nav.leftCol.Size = UDim2.new(1 - r,-math.ceil(left * (1 - r)),1,bodyH)
+		Nav.flowPane.Visible, Nav.flowDivider.Visible = flowOpen, flowOpen
+		Nav.flowDivider.Position = UDim2.new(1 - r,math.floor(left * r),0,TOOL_H)
+		Nav.flowDivider.Size = UDim2.new(0,SPLIT_W,1,bodyH)
+		Nav.flowPane.Position = UDim2.new(1 - r,math.floor(left * r) + SPLIT_W,0,TOOL_H)
+		Nav.flowPane.Size = UDim2.new(r,-math.floor(left * r) - SPLIT_W,1,bodyH)
 		refreshToolbar()
 	end
 
 	local function showMatch()
-		local m = matches[matchIdx]
+		local m = Nav.matches[Nav.matchIdx]
 		if not m then return end
 		local line, col, len = m[1], m[2], m[3]
 		codeFrame.SelectionRange = {{col, line - 1}, {col + len, line - 1}}
@@ -2863,43 +2798,43 @@ local function main()
 	end
 
 	local function recomputeFind(jump)
-		matches, matchIdx = {}, 0
+		Nav.matches, Nav.matchIdx = {}, 0
 		Nav.findWhy = nil
-		local needle = findBox:GetText()
+		local needle = Nav.findBox:GetText()
 
-		if findMode == "find" and needle ~= "" and Analysis then
+		if Nav.findMode == "find" and needle ~= "" and Analysis then
 			-- the search the Game pages use: plain text, a whole word or a Lua pattern (Nav.findKind)
 			local lines = codeFrame.Lines
-			local found, why = Analysis.SearchText(table.concat(lines, "\n"), needle, Nav.findKind or "text", findCase, MAX_MATCHES)
+			local found, why = Analysis.SearchText(table.concat(lines, "\n"), needle, Nav.findKind or "text", Nav.findCase, MAX_MATCHES)
 			if not found then
-				findCount.Text = "invalid"
+				Nav.findCount.Text = "invalid"
 				Nav.findWhy = why
 				refreshMarkers()
 				return
 			end
 			for i,m in ipairs(found) do
-				matches[i] = {m.line, m.col, math.min(m.len, math.max(1, #(lines[m.line] or "") - m.col)), m.text}
+				Nav.matches[i] = {m.line, m.col, math.min(m.len, math.max(1, #(lines[m.line] or "") - m.col)), m.text}
 			end
 
-			if #matches > 0 then
-				matchIdx = 1
+			if #Nav.matches > 0 then
+				Nav.matchIdx = 1
 				local cy, cx = codeFrame.CursorY + 1, codeFrame.CursorX
-				for i,m in ipairs(matches) do
-					if m[1] > cy or (m[1] == cy and m[2] >= cx) then matchIdx = i break end
+				for i,m in ipairs(Nav.matches) do
+					if m[1] > cy or (m[1] == cy and m[2] >= cx) then Nav.matchIdx = i break end
 				end
 				if jump then showMatch() end
 			end
-			findCount.Text = #matches > 0 and (matchIdx.."/"..#matches..(#matches >= MAX_MATCHES and "+" or "")) or "none"
+			Nav.findCount.Text = #Nav.matches > 0 and (Nav.matchIdx.."/"..#Nav.matches..(#Nav.matches >= MAX_MATCHES and "+" or "")) or "none"
 		else
-			findCount.Text = ""
+			Nav.findCount.Text = ""
 		end
 		refreshMarkers()
 	end
 
 	local function stepMatch(dir)
-		if #matches == 0 then recomputeFind(true) return end
-		matchIdx = (matchIdx - 1 + dir) % #matches + 1
-		findCount.Text = matchIdx.."/"..#matches..(#matches >= MAX_MATCHES and "+" or "")
+		if #Nav.matches == 0 then recomputeFind(true) return end
+		Nav.matchIdx = (Nav.matchIdx - 1 + dir) % #Nav.matches + 1
+		Nav.findCount.Text = Nav.matchIdx.."/"..#Nav.matches..(#Nav.matches >= MAX_MATCHES and "+" or "")
 		showMatch()
 	end
 
@@ -2907,41 +2842,41 @@ local function main()
 	-- a search that comes back by itself: it takes neither the keyboard nor the cursor.
 	local function openBar(mode, prefill, quiet)
 		-- a rename, a note or a line number borrows the bar from a search, which comes back after it
-		if findOpen and findMode == "find" and mode ~= "find" then Nav.findKeep = findBox:GetText() end
+		if Nav.findOpen and Nav.findMode == "find" and mode ~= "find" then Nav.findKeep = Nav.findBox:GetText() end
 		Nav.findQuiet = quiet and os.clock() or nil
-		findOpen, findMode = true, mode
-		findLabel.Text = ({find = "Find", line = "Line", rename = "Rename", note = "Note"})[mode]
-		findCount.Text = ""
-		matches, matchIdx = {}, 0
+		Nav.findOpen, Nav.findMode = true, mode
+		Nav.findLabel.Text = ({find = "Find", line = "Line", rename = "Rename", note = "Note"})[mode]
+		Nav.findCount.Text = ""
+		Nav.matches, Nav.matchIdx = {}, 0
 		for _,b in ipairs(navButtons) do b.Visible = mode == "find" end
-		findBox:SetText(prefill or "")
+		Nav.findBox:SetText(prefill or "")
 		relayout()
 		if quiet then
-			findBox.TextBox:ReleaseFocus()
+			Nav.findBox.TextBox:ReleaseFocus()
 			recomputeFind(false)
 			return
 		end
 		task.defer(function()
-			findBox.TextBox:CaptureFocus()
-			local len = #findBox:GetText()
+			Nav.findBox.TextBox:CaptureFocus()
+			local len = #Nav.findBox:GetText()
 			if len > 0 then
-				findBox.TextBox.SelectionStart = 1
-				findBox.TextBox.CursorPosition = len + 1
+				Nav.findBox.TextBox.SelectionStart = 1
+				Nav.findBox.TextBox.CursorPosition = len + 1
 			end
 		end)
 	end
 
 	local function closeBar()
-		if not findOpen then return end
-		local keep = findMode ~= "find" and Nav.findKeep
+		if not Nav.findOpen then return end
+		local keep = Nav.findMode ~= "find" and Nav.findKeep
 		Nav.findKeep = nil
 		if keep and keep ~= "" then
 			openBar("find", keep, true) -- back to the search the bar was borrowed from
 			return
 		end
-		findOpen = false
-		matches, matchIdx = {}, 0
-		findBox.TextBox:ReleaseFocus()
+		Nav.findOpen = false
+		Nav.matches, Nav.matchIdx = {}, 0
+		Nav.findBox.TextBox:ReleaseFocus()
 		relayout()
 		refreshMarkers()
 	end
@@ -2949,8 +2884,8 @@ local function main()
 	-- Every match of the find in this script as a list in the navigator.
 	Nav.listMatches = function()
 		local tab = tabs[activeTab]
-		if not tab or #matches == 0 then toast("Nothing found to list", "warn") return end
-		local list, needle = table.clone(matches), findBox:GetText()
+		if not tab or #Nav.matches == 0 then toast("Nothing found to list", "warn") return end
+		local list, needle = table.clone(Nav.matches), Nav.findBox:GetText()
 		Nav.showRefs(('"%s" in %s (%d%s)'):format(#needle > 20 and (needle:sub(1, 18).."..") or needle, tab.Name, #list, #list >= MAX_MATCHES and "+" or ""), function()
 			eachRow(list, 0, function(n, _, m)
 				addNavRow(n, m[4] or "", function() Nav.go(tab, m[1], m[2]) end, ":"..m[1])
@@ -2961,24 +2896,24 @@ local function main()
 	local function openFind()
 		local selected = codeFrame:IsValidRange() and codeFrame:GetSelectionText() or ""
 		if selected == "" or selected:find("\n") or #selected > 100 then
-			selected = (findOpen and findMode == "find") and findBox:GetText() or ""
+			selected = (Nav.findOpen and Nav.findMode == "find") and Nav.findBox:GetText() or ""
 		end
 		openBar("find", selected)
 	end
 
 	local function submitBar()
-		local text = findBox:GetText()
-		if findMode == "find" then
+		local text = Nav.findBox:GetText()
+		if Nav.findMode == "find" then
 			stepMatch(1)
-			task.defer(function() findBox.TextBox:CaptureFocus() end) -- keep stepping with Enter
-		elseif findMode == "line" then
+			task.defer(function() Nav.findBox.TextBox:CaptureFocus() end) -- keep stepping with Enter
+		elseif Nav.findMode == "line" then
 			local n = tonumber(text:match("%d+"))
 			if n then jumpTo(math.clamp(n, 1, #codeFrame.Lines), 0) end
 			closeBar()
-		elseif findMode == "rename" then
+		elseif Nav.findMode == "rename" then
 			commitRename(text)
 			closeBar()
-		elseif findMode == "note" then
+		elseif Nav.findMode == "note" then
 			setNote(cursorLine(), text)
 			closeBar()
 		end
@@ -3440,12 +3375,14 @@ local function main()
 	----------------------------------------------------------------------------------------------
 
 	-- Decompiles a script (with a specific decompiler, or the configured one) and returns the text for
-	-- the viewer (with its header), whether it worked, and the raw decompiler output.
-	local function decompileScript(scr, decompiler)
+	-- the viewer (with its header), whether it worked, and the raw decompiler output. With known (a
+	-- decompile there already is, see Tools.textOf) nothing is decompiled: it only gets the header.
+	local function decompileScript(scr, decompiler, known)
 		local oldtick = tick()
-		local s,source = pcall(decompiler or env.decompile or function() end,scr)
+		local s,source,why = true,known,nil
+		if not known then s,source,why = pcall(decompiler or env.decompile or function() end,scr) end
 
-		if not s or not source then
+		if not s or type(source) ~= "string" then
 			local text = "-- Unable to view source.\n"
 
 			if Settings.ScriptViewer.ShowMoreInfo then
@@ -3455,7 +3392,9 @@ local function main()
 				elseif not env.isdecompile() then
 					text = text .. "-- Reason: Your executor does not support decompiler. (missing 'decompile' function and 'getscriptbytecode' function as fallback)\n"
 				else
-					text = text .. "-- Reason: Unknown Error.\n"
+					-- what the decompiler said (a fallback returns nil and why), or the error it raised
+					local reason = (s and why) or (not s and source) or nil
+					text = text .. "-- Reason: "..(reason and tostring(reason):gsub("%s+", " "):sub(1, 300) or "Unknown Error.").."\n"
 				end
 				text = text .. "-- Executor: "..executorName.." ("..executorVersion..")"
 			end
@@ -3465,7 +3404,11 @@ local function main()
 		local text = "-- Script Path: "..getPath(scr).."\n"
 
 		if Settings.ScriptViewer.ShowMoreInfo then
-			text = text .. "-- Took "..tostring(math.floor( (tick() - oldtick) * 100) / 100).."s to decompile.\n"
+			if known then
+				text = text .. "-- From the decompile cache (Decompiler > Decompile with... makes a new one).\n"
+			else
+				text = text .. "-- Took "..tostring(math.floor( (tick() - oldtick) * 100) / 100).."s to decompile.\n"
+			end
 			text = text .. "-- Executor: "..executorName.." ("..executorVersion..")\n\n"
 		end
 
@@ -3547,6 +3490,15 @@ local function main()
 		activeTab = i
 		local tab = tabs[i]
 
+		-- an analysis takes some fifty times the room of its script: the three tabs used last keep theirs,
+		-- the others are analysed again when they are next shown
+		tab.Used = os.clock()
+		local byUse = table.clone(tabs)
+		table.sort(byUse, function(a, b) return (a.Used or 0) > (b.Used or 0) end)
+		for n = 4, #byUse do
+			byUse[n].Analysis, byUse[n].AnText, byUse[n].AnState = nil, nil, nil
+		end
+
 		setFollow(nil, nil) -- worked out again for this script a moment later
 		lastSyncLine = nil
 		resetSidebarPages()
@@ -3571,7 +3523,7 @@ local function main()
 		updateStatus()
 		Live.hideCard()
 		Live.draw()
-		if findOpen and findMode == "find" then recomputeFind(false) end
+		if Nav.findOpen and Nav.findMode == "find" then recomputeFind(false) end
 	end
 
 	local function closeTab(i)
@@ -3937,7 +3889,7 @@ local function main()
 				local text = codeFrame.Lines[line]
 				if text then codeFrame.Lines[line] = text:sub(1, col)..new[t]..text:sub(col + #R.tv[t] + 1) end
 			end
-			codeFrame:ProcessTextChange(true)
+			codeFrame:ProcessTextChange()
 			for _,s in ipairs(list) do recordRename(tab, R, s.sym, s.name) end
 			saveAnn(tab)
 			refreshFlow()
@@ -4242,6 +4194,22 @@ local function main()
 			return entry
 		end
 
+		-- The decompile there is of a script, without asking the decompiler: what was read in this session,
+		-- else what the disk has under its hash. nil when there is none.
+		Tools.textOf = function(scr)
+			local entry = memory[scr]
+			if entry then return entry.Text end
+			local hash = D.scriptHash(scr)
+			if not hash then return nil end
+			if byHash[hash] then return byHash[hash].Text end
+			return (D.cachedRead(hash))
+		end
+
+		-- OpenDex is being reloaded or closed: the reading, parsing and searching in the background stop
+		Tools.unload = function()
+			state.Dead, state.Cancel, state.Want = true, true, false
+		end
+
 		----------------------------------------------------------------------------------------------
 		-- Searching what has been read
 		----------------------------------------------------------------------------------------------
@@ -4282,9 +4250,13 @@ local function main()
 			end
 		end
 
-		-- The query (or how it is read) changed: the scripts read so far are searched again.
+		-- The query (or how it is read) changed: the scripts read so far are searched again. Searching the
+		-- text is done at once. The searches of the code parse every script that has the word, so they are
+		-- done a few milliseconds at a time, and a newer search stops one that is still going.
 		local function rematch()
 			results, resultOf, matchTotal, state.Error = {}, {}, 0, nil
+			state.MatchGen = (state.MatchGen or 0) + 1
+			state.Matching = false
 			if query == "" then return end
 			if mode == "pattern" then
 				local ok, why = Analysis.SearchText("", query, mode, matchCase, 1)
@@ -4296,9 +4268,34 @@ local function main()
 				state.Error = "Write the name of a function, or name(text in its arguments)"
 				return
 			end
+
+			local todo = {}
 			for scr,entry in pairs(memory) do
-				if not skipped(scr) then matchScript(scr, entry) end
+				if not skipped(scr) then todo[#todo+1] = {scr, entry} end
 			end
+			if not K.TOKEN_MODES[mode] then
+				for _,item in ipairs(todo) do matchScript(item[1], item[2]) end
+				return
+			end
+
+			local gen = state.MatchGen
+			state.Matching = true
+			task.spawn(function()
+				local frameStart = os.clock()
+				for _,item in ipairs(todo) do
+					if gen ~= state.MatchGen or state.Dead then return end
+					pcall(matchScript, item[1], item[2])
+					state.Version = state.Version + 1
+					if os.clock() - frameStart > K.BUDGET then
+						task.wait()
+						frameStart = os.clock()
+					end
+				end
+				if gen == state.MatchGen then
+					state.Matching = false
+					state.Version = state.Version + 1
+				end
+			end)
 		end
 
 		----------------------------------------------------------------------------------------------
@@ -4411,7 +4408,7 @@ local function main()
 		-- Reads the scripts that have not been read: a few at a time, giving the game its frame back after
 		-- a few milliseconds of work. fresh forgets what was read (and the failures) first.
 		Tools.scan = function(fresh)
-			if state.Running then return end
+			if state.Running or state.Dead then return end
 			D.loadBaseline()
 			local incremental = state.Scanned and not fresh
 			state.Running, state.Cancel, state.Scanned = true, false, false
@@ -4523,8 +4520,8 @@ local function main()
 					end
 				end)
 			end
-			game.DescendantAdded:Connect(changed)
-			game.DescendantRemoving:Connect(changed)
+			Main.Track(game.DescendantAdded:Connect(changed)) -- (tracked: a reload of OpenDex disconnects them)
+			Main.Track(game.DescendantRemoving:Connect(changed))
 		end
 
 		-- Searches every script for text (reading them first if that hasn't been done).
@@ -4577,8 +4574,9 @@ local function main()
 		local function follow(page, box)
 			local shown, lastDraw = state.Version, os.clock()
 			page.Tick = function()
-				local busy = state.Running or state.Indexing or state.Retrying
-				if busy and state.Version ~= shown and os.clock() - lastDraw > 0.75 and not (box and box.TextBox:IsFocused()) then
+				-- drawn again now and then while the work goes on, and once more when it is over
+				local busy = state.Running or state.Indexing or state.Retrying or state.Matching
+				if state.Version ~= shown and (not busy or os.clock() - lastDraw > 0.75) and not (box and box.TextBox:IsFocused()) then
 					renderEdit()
 				end
 			end
@@ -4619,6 +4617,7 @@ local function main()
 		-- Parses every script read, in the background; whatever needs the digests calls this first. Starts the
 		-- reading too if that has not been done.
 		Tools.index = function()
+			if state.Dead then return end
 			state.Want = true
 			if state.Running or not state.Scanned then
 				if not state.Running then Tools.scan() end
@@ -4637,6 +4636,7 @@ local function main()
 			task.spawn(function()
 				local frameStart = os.clock()
 				for _,entry in ipairs(todo) do
+					if state.Dead then return end
 					digestOf(entry)
 					state.IndexDone = state.IndexDone + 1
 					state.Version = state.Version + 1
@@ -5091,6 +5091,7 @@ local function main()
 			task.spawn(function()
 				local fixed = 0
 				for _,scr in ipairs(todo) do
+					if state.Dead then return end
 					local ok, entry = pcall(readScript, scr, true, decompiler)
 					if ok and entry then
 						memory[scr] = entry
@@ -5371,6 +5372,8 @@ local function main()
 					status.Text = state.Error
 				elseif state.Running then
 					status.Text = ("Reading the scripts: %d of %d.  %d have matches"):format(state.Done, state.Total, #results)
+				elseif state.Matching then
+					status.Text = ("Searching the code of the scripts read.  %d have matches so far"):format(#results)
 				elseif state.Indexing then
 					status.Text = ("Parsing the scripts: %d of %d.  %d have matches"):format(state.IndexDone, state.IndexTotal, #results)
 				elseif state.Scanned then
@@ -5419,7 +5422,7 @@ local function main()
 					order = order + 1
 					Tools.link(order, ("%d more in this script: open it with the find bar"):format(#r.Matches - 4), function()
 						ScriptViewer.ViewScript(r.Script, r.Matches[5].line)
-						Nav.findKind, findCase = (mode == "word" or mode == "pattern") and mode or "text", matchCase
+						Nav.findKind, Nav.findCase = (mode == "word" or mode == "pattern") and mode or "text", matchCase
 						Nav.paintFind()
 						openBar("find", query)
 					end)
@@ -5453,11 +5456,11 @@ local function main()
 				end)
 			end
 
-			local shown, lastDraw = state.Version, os.clock()
+			follow(page, box) -- the rows, as the work in the background goes on
+			local redraw = page.Tick
 			page.Tick = function()
 				paint()
-				local busy = state.Running or state.Indexing or state.Retrying
-				if busy and state.Version ~= shown and os.clock() - lastDraw > 0.75 and not box.TextBox:IsFocused() then renderEdit() end
+				redraw()
 			end
 		end}
 	end
@@ -5619,10 +5622,6 @@ local function main()
 		if not ok then toast("The script errored: "..tostring(runErr), "error") end
 	end
 
-	local function dumpFunctions()
-		if currentScript() then pcall(ScriptViewer.DumpFunctions, currentScript()) end
-	end
-
 	-- A menu object kept between openings and cleared each time, so its items follow the viewer's state.
 	local function freshMenu(menu, width)
 		menu = menu or Lib.ContextMenu.new()
@@ -5636,7 +5635,7 @@ local function main()
 	-- Under a button of the toolbar; over one of the status bar (the menu opens upwards from that y).
 	local function showUnder(menu, button)
 		local y = button.AbsolutePosition.Y
-		menu:Show(button.AbsolutePosition.X, button.Parent == statusBar and y or (y + button.AbsoluteSize.Y))
+		menu:Show(button.AbsolutePosition.X, button.Parent == Nav.statusBar and y or (y + button.AbsoluteSize.Y))
 	end
 
 	local fileMenu, runMenu, decompilerMenu, codeMenu
@@ -5653,7 +5652,6 @@ local function main()
 		runMenu = freshMenu(runMenu, 230)
 		local live = liveReason()
 		runMenu:Add({Name = "Execute", Disabled = env.loadstring == nil, Reason = "Your executor has no loadstring", Tooltip = "Run the text in the editor", OnClick = executeText})
-		runMenu:Add({Name = "Dump Functions", Disabled = live ~= false or env.getupvalues == nil or env.getconstants == nil, Reason = live or "Your executor needs getupvalues and getconstants", Tooltip = "Append every live function's upvalues and constants to the text", OnClick = dumpFunctions})
 		showUnder(runMenu, button)
 	end
 
@@ -5904,7 +5902,6 @@ local function main()
 		add("Copy script to clipboard", copyAll, env.setclipboard == nil and "Your executor has no setclipboard")
 		add("Save script to file", saveFile, env.writefile == nil and "Your executor has no writefile")
 		add("Execute script", executeText, env.loadstring == nil and "Your executor has no loadstring")
-		add("Dump functions", dumpFunctions, live)
 		add(Live.On and "Hide live marks" or "Show live marks", function() Live.toggle() end, live)
 		add("Rescan the running functions", function() Live.rescan() end, live)
 		add("Trace log", function() Live.showTrace() end, env.hookfunction == nil and "Your executor has no hookfunction")
@@ -5986,7 +5983,7 @@ local function main()
 
 	refreshToolbar = function()
 		if not toolToggles.find then return end
-		toolToggles.find.Active = findOpen and findMode == "find"
+		toolToggles.find.Active = Nav.findOpen and Nav.findMode == "find"
 		toolToggles.flow.Active = flowOpen
 		toolToggles.side.Active = sideOpen
 		if toolToggles.live then toolToggles.live.Active = Live.On end
@@ -6163,10 +6160,10 @@ local function main()
 		end)
 
 		-- Toolbar: Back, Forward, where the cursor is | Find, Navigator, Graph, Live | File, Run, Decompiler
-		toolbar = createSimple("Frame", {Name = "Toolbar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(1,0,0,TOOL_H), Parent = content})
-		createSimple("Frame", {BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1), Parent = toolbar})
+		Nav.toolbar = createSimple("Frame", {Name = "Toolbar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(1,0,0,TOOL_H), Parent = content})
+		createSimple("Frame", {BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1), Parent = Nav.toolbar})
 
-		local toolX, toolParent = 4, toolbar
+		local toolX, toolParent = 4, Nav.toolbar
 		local function toolButton(text, tip, onClick, isMenu)
 			local ok, size = pcall(function()
 				return service.TextService:GetTextSize(text, 14, Enum.Font.SourceSans, Vector2.new(400, 20))
@@ -6227,10 +6224,10 @@ local function main()
 		local crumbX = toolX + 6
 
 		-- on the right: the search, the panes, the menus
-		local group = createSimple("Frame", {Name = "Right", AnchorPoint = Vector2.new(1,0), BackgroundTransparency = 1, BorderSizePixel = 0, Position = UDim2.new(1,-4,0,0), Size = UDim2.new(0,0,1,0), Parent = toolbar})
+		local group = createSimple("Frame", {Name = "Right", AnchorPoint = Vector2.new(1,0), BackgroundTransparency = 1, BorderSizePixel = 0, Position = UDim2.new(1,-4,0,0), Size = UDim2.new(0,0,1,0), Parent = Nav.toolbar})
 		toolX, toolParent = 0, group
 		toolToggles.find = toolButton("Find", "Find in this script", function()
-			if findOpen and findMode == "find" then closeBar() else openFind() end
+			if Nav.findOpen and Nav.findMode == "find" then closeBar() else openFind() end
 		end)
 		toolSeparator()
 		toolToggles.side = toolButton("Navigator", "Show or hide the navigator: the script's outline, calls, remotes and marks, the running game, and every script of the game", function() setSideOpen(not sideOpen) end)
@@ -6245,14 +6242,13 @@ local function main()
 		group.Size = UDim2.new(0,toolX,1,0)
 
 		-- between them: where the cursor is (Nav.paintCrumbs)
-		Nav.crumbBar = createSimple("Frame", {Name = "Where", BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true, Position = UDim2.new(0,crumbX,0,0), Size = UDim2.new(1,-(crumbX + toolX + 16),1,0), Parent = toolbar})
+		Nav.crumbBar = createSimple("Frame", {Name = "Where", BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true, Position = UDim2.new(0,crumbX,0,0), Size = UDim2.new(1,-(crumbX + toolX + 16),1,0), Parent = Nav.toolbar})
 
 		-- The code column: tabs, find bar and editor (relayout places them)
-		leftCol = createSimple("Frame", {Name = "Code", BackgroundTransparency = 1, BorderSizePixel = 0, Parent = content})
+		Nav.leftCol = createSimple("Frame", {Name = "Code", BackgroundTransparency = 1, BorderSizePixel = 0, Parent = content})
 
-		codeFrame = Lib.CodeFrame.new()
-		codeFrame.ReadOnly = true -- a viewer: select, copy and move the cursor, but nothing can be typed or deleted
-		codeFrame.Frame.Parent = leftCol
+		codeFrame = Lib.CodeFrame.new() -- shows text: select, copy and move the cursor, but nothing can be typed
+		codeFrame.Frame.Parent = Nav.leftCol
 		Live.Init(codeFrame, content)
 
 		-- With no script open the code area says how to open one
@@ -6267,7 +6263,7 @@ local function main()
 			TextWrapped = true,
 			Text = "No script is open.\n\nRight-click a script in the Explorer and choose View Script,\nopen one by name from Commands in the OpenDex menu,\nor search every script on the Game pages of the navigator.",
 			ZIndex = 6,
-			Parent = leftCol,
+			Parent = Nav.leftCol,
 		})
 
 		-- A click on a line number bookmarks that line (bookmarked numbers are blue)
@@ -6500,7 +6496,7 @@ local function main()
 		end))
 
 		-- Tab strip, and at its end the list of the tabs (open, and closed lately)
-		Nav.tabList = createSimple("TextButton", {Name = "TabList", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(0,22,0,TAB_H), Text = "", Visible = false, Parent = leftCol})
+		Nav.tabList = createSimple("TextButton", {Name = "TabList", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(0,22,0,TAB_H), Text = "", Visible = false, Parent = Nav.leftCol})
 		local listArrow = Lib.CreateArrow(9, 4, "down")
 		listArrow.Position = UDim2.new(0.5,-5,0.5,-4)
 		listArrow.Parent = Nav.tabList
@@ -6517,7 +6513,7 @@ local function main()
 			ScrollBarThickness = 3,
 			ScrollBarImageColor3 = Settings.Theme.Highlight,
 			Visible = false,
-			Parent = leftCol,
+			Parent = Nav.leftCol,
 		})
 		createSimple("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0,1), Parent = tabStrip})
 		tabStrip.InputChanged:Connect(function(input)
@@ -6527,14 +6523,14 @@ local function main()
 		end)
 
 		-- Find / line / rename / note bar
-		findBar = createSimple("Frame", {Name = "Bar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(1,0,0,FIND_H), Visible = false, Parent = leftCol})
-		findLabel = newLabel(findBar, "Find", UDim2.new(0,6,0,0), UDim2.new(0,44,1,0), WHITE)
-		findBox = Lib.ViewportTextBox.new()
-		findBox.Position = UDim2.new(0,50,0,3)
-		findBox.Size = UDim2.new(1,-334,0,FIND_H - 6)
-		findBox.Parent = findBar
-		findCount = newLabel(findBar, "", UDim2.new(1,-190,0,0), UDim2.new(0,54,1,0), GREY)
-		Lib.Tooltip.attach(findCount, function() return Nav.findWhy end) -- why a pattern is no good
+		Nav.findBar = createSimple("Frame", {Name = "Bar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(1,0,0,FIND_H), Visible = false, Parent = Nav.leftCol})
+		Nav.findLabel = newLabel(Nav.findBar, "Find", UDim2.new(0,6,0,0), UDim2.new(0,44,1,0), WHITE)
+		Nav.findBox = Lib.ViewportTextBox.new()
+		Nav.findBox.Position = UDim2.new(0,50,0,3)
+		Nav.findBox.Size = UDim2.new(1,-334,0,FIND_H - 6)
+		Nav.findBox.Parent = Nav.findBar
+		Nav.findCount = newLabel(Nav.findBar, "", UDim2.new(1,-190,0,0), UDim2.new(0,54,1,0), GREY)
+		Lib.Tooltip.attach(Nav.findCount, function() return Nav.findWhy end) -- why a pattern is no good
 
 		-- from the right edge: close, all scripts, list, next, previous, (the count), pattern, whole word, case
 		local function barButton(text, x, width, tip, onClick)
@@ -6547,7 +6543,7 @@ local function main()
 			btn.TextColor3 = WHITE
 			btn.Text = text
 			btn.MouseButton1Click:Connect(onClick)
-			btn.Parent = findBar
+			btn.Parent = Nav.findBar
 			Lib.Tooltip.attach(btn, tip)
 			return btn
 		end
@@ -6555,7 +6551,7 @@ local function main()
 		-- The toggles show how the bar searches (the Search page can set that too, when it hands a search over).
 		Nav.paintFind = function()
 			local on = Color3.fromRGB(255,220,90)
-			caseBtn.TextColor3 = findCase and on or WHITE
+			Nav.caseBtn.TextColor3 = Nav.findCase and on or WHITE
 			wordBtn.TextColor3 = Nav.findKind == "word" and on or WHITE
 			patternBtn.TextColor3 = Nav.findKind == "pattern" and on or WHITE
 		end
@@ -6564,39 +6560,39 @@ local function main()
 			Nav.paintFind()
 			recomputeFind(true)
 		end
-		caseBtn = barButton("Aa", -278, 24, "Match case", function()
-			findCase = not findCase
+		Nav.caseBtn = barButton("Aa", -278, 24, "Match case", function()
+			Nav.findCase = not Nav.findCase
 			Nav.paintFind()
 			recomputeFind(true)
 		end)
 		wordBtn = barButton("Word", -252, 36, "Whole words only", function() setKind("word") end)
 		patternBtn = barButton(".*", -214, 22, "The text is a Lua pattern (%d+, [%w_]+ ...)", function() setKind("pattern") end)
 		navButtons = {
-			caseBtn, wordBtn, patternBtn,
+			Nav.caseBtn, wordBtn, patternBtn,
 			barButton("<", -134, 22, "Previous match", function() stepMatch(-1) end),
 			barButton(">", -112, 22, "Next match", function() stepMatch(1) end),
 			barButton("List", -88, 32, "List every match in this script in the navigator", function() Nav.listMatches() end),
 			barButton("All", -54, 30, "Search every script of the game for this, the same way", function()
-				Tools.openSearch(findBox:GetText(), Nav.findKind or "text", findCase)
+				Tools.openSearch(Nav.findBox:GetText(), Nav.findKind or "text", Nav.findCase)
 			end),
 		}
 		barButton("x", -22, 22, "Close (Esc)", closeBar)
 
-		findBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
+		Nav.findBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
 			-- (a search that came back by itself after a rename or a note leaves the cursor where it is)
-			if findOpen and findMode == "find" then recomputeFind(not (Nav.findQuiet and os.clock() - Nav.findQuiet < 0.3)) end
+			if Nav.findOpen and Nav.findMode == "find" then recomputeFind(not (Nav.findQuiet and os.clock() - Nav.findQuiet < 0.3)) end
 		end)
-		findBox.TextBox.FocusLost:Connect(function(enterPressed)
-			if enterPressed and findOpen then submitBar() end
+		Nav.findBox.TextBox.FocusLost:Connect(function(enterPressed)
+			if enterPressed and Nav.findOpen then submitBar() end
 		end)
 
 		-- The navigator. From the top: the scopes, the pages of the scope that is showing, the page's title
 		-- (with Back once a page was opened from another), the filter of a long list, the page's rows.
-		sideFrame = createSimple("Frame", {Name = "Sidebar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, ClipsDescendants = true, Visible = sideOpen, Parent = content})
+		Nav.sideFrame = createSimple("Frame", {Name = "Sidebar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, ClipsDescendants = true, Visible = sideOpen, Parent = content})
 		Nav.sideDivider = createSimple("TextButton", {Name = "SideDivider", AutoButtonColor = false, BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Text = "", Parent = content})
 		Lib.Tooltip.attach(Nav.sideDivider, "Drag to resize the navigator")
 
-		local scopeStrip = createSimple("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1,0,0,24), Parent = sideFrame})
+		local scopeStrip = createSimple("Frame", {BackgroundTransparency = 1, Size = UDim2.new(1,0,0,24), Parent = Nav.sideFrame})
 		for i,scope in ipairs(SCOPES) do
 			local btn = createSimple("TextButton", {
 				AutoButtonColor = false,
@@ -6625,7 +6621,7 @@ local function main()
 			AutomaticCanvasSize = Enum.AutomaticSize.X,
 			ScrollingDirection = Enum.ScrollingDirection.X,
 			ScrollBarThickness = 0,
-			Parent = sideFrame,
+			Parent = Nav.sideFrame,
 		})
 		createSimple("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0,2), Parent = chipStrip})
 		chipStrip.InputChanged:Connect(function(input)
@@ -6667,7 +6663,7 @@ local function main()
 		editBack.TextColor3 = WHITE
 		editBack.TextXAlignment = Enum.TextXAlignment.Left
 		editBack.Visible = false
-		editBack.Parent = sideFrame
+		editBack.Parent = Nav.sideFrame
 		Lib.Tooltip.attach(editBack, "Back to the page this one was opened from")
 		editBack.MouseButton1Click:Connect(function()
 			local stack = sideStacks[sideTab]
@@ -6677,14 +6673,14 @@ local function main()
 			end
 		end)
 
-		editTitle = newLabel(sideFrame, "", UDim2.new(0,8,0,48), UDim2.new(1,-12,0,22), WHITE)
+		editTitle = newLabel(Nav.sideFrame, "", UDim2.new(0,8,0,48), UDim2.new(1,-12,0,22), WHITE)
 
 		-- typing in it leaves out the rows without that text, before a long list is cut
 		Nav.filterBox = Lib.ViewportTextBox.new()
 		Nav.filterBox.Position = UDim2.new(0,6,0,72)
 		Nav.filterBox.Size = UDim2.new(1,-14,0,20)
 		Nav.filterBox.Visible = false
-		Nav.filterBox.Parent = sideFrame
+		Nav.filterBox.Parent = Nav.sideFrame
 		Nav.filterBox.TextBox.PlaceholderText = "Filter this list"
 		Nav.filterBox.TextBox.PlaceholderColor3 = Settings.Theme.PlaceholderText
 		Nav.filterBox.TextBox:GetPropertyChangedSignal("Text"):Connect(function()
@@ -6702,7 +6698,7 @@ local function main()
 		editList.CanvasSize = UDim2.new(0,0,0,0)
 		editList.AutomaticCanvasSize = Enum.AutomaticSize.Y
 		editList.ScrollBarThickness = 8
-		editList.Parent = sideFrame
+		editList.Parent = Nav.sideFrame
 
 		local editListLayout = Instance.new("UIListLayout")
 		editListLayout.SortOrder = Enum.SortOrder.LayoutOrder
@@ -6710,12 +6706,12 @@ local function main()
 		editListLayout.Parent = editList
 
 		-- The graph pane, and the divider between it and the code
-		flowPane = createSimple("Frame", {Name = "Flowchart", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, ClipsDescendants = true, Parent = content})
-		flowDivider = createSimple("TextButton", {Name = "Divider", AutoButtonColor = false, BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Text = "", Parent = content})
-		Lib.Tooltip.attach(flowDivider, "Drag to resize the graph pane")
+		Nav.flowPane = createSimple("Frame", {Name = "Flowchart", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, ClipsDescendants = true, Parent = content})
+		Nav.flowDivider = createSimple("TextButton", {Name = "Divider", AutoButtonColor = false, BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Text = "", Parent = content})
+		Lib.Tooltip.attach(Nav.flowDivider, "Drag to resize the graph pane")
 		if Flowchart then
 			-- the pane's switch: the flowchart of a function, the script's call graph, the modules around it
-			Flowchart.Attach(flowPane, function() return flowOpen and window:IsContentVisible() end, function(mode)
+			Flowchart.Attach(Nav.flowPane, function() return flowOpen and window:IsContentVisible() end, function(mode)
 				if mode == "calls" then
 					showCallGraph()
 				elseif mode == "modules" then
@@ -6728,8 +6724,8 @@ local function main()
 		end
 
 		-- The status bar
-		statusBar = createSimple("Frame", {Name = "Status", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-STATUS_H), Size = UDim2.new(1,0,0,STATUS_H), Parent = content})
-		createSimple("Frame", {BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Size = UDim2.new(1,0,0,1), Parent = statusBar})
+		Nav.statusBar = createSimple("Frame", {Name = "Status", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-STATUS_H), Size = UDim2.new(1,0,0,STATUS_H), Parent = content})
+		createSimple("Frame", {BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Size = UDim2.new(1,0,0,1), Parent = Nav.statusBar})
 
 		-- x is from the left edge, or from the right one when it is negative. With onClick it is a button.
 		local function statusLabel(key, tip, x, width, onClick)
@@ -6743,7 +6739,7 @@ local function main()
 				TextXAlignment = Enum.TextXAlignment.Left,
 				TextTruncate = Enum.TextTruncate.AtEnd,
 				Text = "",
-				Parent = statusBar,
+				Parent = Nav.statusBar,
 			})
 			if onClick then lbl.MouseButton1Click:Connect(function() onClick(lbl) end) end
 			Lib.Tooltip.attach(lbl, tip)
@@ -6770,16 +6766,16 @@ local function main()
 			dragging = "side"
 			Nav.sideDivider.BackgroundColor3 = Settings.Theme.ListSelection
 		end)
-		flowDivider.MouseButton1Down:Connect(function()
+		Nav.flowDivider.MouseButton1Down:Connect(function()
 			dragging = "flow"
-			flowDivider.BackgroundColor3 = Settings.Theme.ListSelection
+			Nav.flowDivider.BackgroundColor3 = Settings.Theme.ListSelection
 		end)
 		Main.Track(uis.InputEnded:Connect(function(input)
 			if dragging and input.UserInputType == Enum.UserInputType.MouseButton1 then
 				local was = dragging
 				dragging = nil
 				Nav.sideDivider.BackgroundColor3 = Settings.Theme.Outline1
-				flowDivider.BackgroundColor3 = Settings.Theme.Outline1
+				Nav.flowDivider.BackgroundColor3 = Settings.Theme.Outline1
 				if was == "side" then renderEdit() end -- its texts wrap to the new width
 			end
 		end))
@@ -6800,12 +6796,12 @@ local function main()
 		-- Escape while the viewer is in use (typing in it, or the mouse over it)
 		Main.Track(uis.InputBegan:Connect(function(input)
 			if input.UserInputType ~= Enum.UserInputType.Keyboard or not window:IsContentVisible() then return end
-			local barFocused = findOpen and findBox.TextBox:IsFocused()
+			local barFocused = Nav.findOpen and Nav.findBox.TextBox:IsFocused()
 			if not (codeFrame.Editing or barFocused or Lib.CheckMouseInGui(window.GuiElems.Main)) then return end
 
 			local key = input.KeyCode
 			if key == Enum.KeyCode.Escape and Live.cardOpen() then Live.hideCard()
-			elseif key == Enum.KeyCode.Escape and findOpen then closeBar() end
+			elseif key == Enum.KeyCode.Escape and Nav.findOpen then closeBar() end
 		end))
 
 		-- A few times a second: live pages (watch, trace) update, the toolbar and the status bar follow the
@@ -6859,9 +6855,25 @@ local function main()
 		activateTab(table.find(tabs, tab))
 		window:Show()
 
-		local text, ok, raw = decompileScript(scr)
-		fillTab(tab, text, ok, raw, nil, true)
+		-- what the reading of all scripts has of it is shown as it is: at once, and with the lines that the
+		-- search results and the lists made from it point at (it may come from another decompiler)
+		local okKnown, known = pcall(Tools.textOf, scr)
+		known = okKnown and type(known) == "string" and known or nil
+		local text, ok, raw = decompileScript(scr, nil, known)
+		fillTab(tab, text, ok, raw, known and "Decompile cache" or nil, true)
 		if line and ok and tabs[activeTab] == tab then showLine(line + (tab.Offset or 0), 0) end
+	end
+
+	-- Called by Main.Uninit (Reload OpenDex, in the settings): what this viewer changed in the running game
+	-- is undone, and its work in the background stops.
+	ScriptViewer.Unload = function()
+		pcall(Live.unload)
+		pcall(Tools.unload)
+	end
+
+	-- Explorer: "Find in Scripts" on an object: every script that has its name as a word
+	ScriptViewer.FindInScripts = function(inst)
+		Tools.openSearch(inst.Name, "word")
 	end
 
 	return ScriptViewer
