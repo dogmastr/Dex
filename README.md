@@ -4,6 +4,10 @@
 
 OpenDex is an explorer and script reverse-engineering suite for Roblox that runs inside the game through an executor. Next to the usual Dex windows it has a Script Viewer that works like a code navigator: it parses the decompiled Luau, draws flowcharts, inspects and edits the running script, and searches every script of the game.
 
+## Download
+
+Get `out.lua` from the [latest release](https://github.com/dogmastr/OpenDex/releases/latest) and run it in your executor, or load it directly:
+
 ```lua
 loadstring(game:HttpGet("https://github.com/dogmastr/OpenDex/releases/latest/download/out.lua"))()
 ```
