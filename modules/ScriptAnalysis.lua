@@ -3001,6 +3001,262 @@ local function main()
 		return {class = class, kind = found.kind, member = found.member, declared = found.class}
 	end
 
+	----------------------------------------------------------------------------------------------
+	-- For agents (the AI window): everything useful about one function, renames asked for by name,
+	-- and whether a rule's condition is safe to put in a box. Pure, so they are tested without Roblox.
+	----------------------------------------------------------------------------------------------
+
+	-- One line of the source (1-based), as it is written.
+	local function rawLine(R, line)
+		local from = A.LineStart(R, line)
+		if not from then return "" end
+		local to = (R.nl[line] or (#R.src + 1)) - 1
+		return (R.src:sub(from, to):gsub("\r$", ""))
+	end
+
+	-- The locals a decompiler named (v12, p3, l_Players_0) that belong to a function itself, not to the
+	-- functions inside it: {name, line, tok, param}.
+	function A.GeneratedLocals(R, f)
+		local isParam = {}
+		for _, ti in ipairs(f.params) do isParam[ti] = true end
+		local out = {}
+		for _, sym in ipairs(R.syms) do
+			if sym.decl and A.LooksGenerated(sym.name) and (A.FunctionAtToken(R, sym.decl) or R.root) == f then
+				out[#out + 1] = {name = sym.name, line = R.tl[sym.decl], tok = sym.decl, param = isParam[sym.decl] or nil}
+			end
+		end
+		return out
+	end
+
+	-- function -> the calls that may reach it (the index CallChains uses; whichever of the two is asked
+	-- first makes it)
+	local function callersIndex(R)
+		local callers = R.callersOf
+		if not callers then
+			callers = {}
+			for _, c in ipairs(R.calls) do
+				for _, t in ipairs(A.CallTargets(R, c) or {}) do
+					if t ~= c.ctxFn then
+						local list = callers[t]
+						if not list then
+							list = {}
+							callers[t] = list
+						end
+						list[#list + 1] = c
+					end
+				end
+			end
+			R.callersOf = callers
+		end
+		return callers
+	end
+
+	-- Everything useful about one function, as data: its code with line numbers, who calls it, what it
+	-- calls, the remote, HTTP and loadstring calls inside it, and the locals the decompiler named.
+	-- opts.maxChars cuts the code (12000 by default), opts.maxItems each list (40).
+	function A.FunctionBundle(R, f, opts)
+		opts = opts or {}
+		local maxItems = opts.maxItems or 40
+		local b = {name = A.FunctionName(R, f), signature = A.Signature(R, f), line1 = f.line1, line2 = f.line2, main = f.parent == nil}
+
+		-- what it calls itself (not what the functions inside it call)
+		local seen, calls = {}, {}
+		for _, c in ipairs(R.calls) do
+			if c.ctxFn == f then
+				local text = A.Text(R, c.fn.s, c.fn.e, 50) .. (c.method and (":" .. R.tv[c.method]) or "")
+				if not seen[text] then
+					seen[text] = true
+					if #calls < maxItems then
+						local targets = A.CallTargets(R, c)
+						calls[#calls + 1] = {text = text, line = R.tl[c.s], inScript = targets and #targets == 1 and A.FunctionName(R, targets[1]) or nil}
+					else
+						b.moreCalls = true
+					end
+				end
+			end
+		end
+		b.calls = calls
+
+		local callers = {}
+		for _, c in ipairs(callersIndex(R)[f] or {}) do
+			if #callers < maxItems then callers[#callers + 1] = {name = A.FunctionName(R, c.ctxFn), line = R.tl[c.s]} end
+		end
+		b.callers = callers
+
+		local remotes = {}
+		for _, r in ipairs(A.Remotes(R)) do
+			if r.line >= f.line1 and r.line <= f.line2 and #remotes < maxItems then
+				remotes[#remotes + 1] = {kind = r.kind, method = r.method, line = r.line, path = r.path and r.path.text or nil,
+					resolved = r.path ~= nil and r.path.root ~= nil, args = r.args, argCount = r.argCount}
+			end
+		end
+		b.remotes = remotes
+
+		b.locals = A.GeneratedLocals(R, f)
+
+		local lines, size = {}, 0
+		local maxChars = opts.maxChars or 12000
+		b.lastLine = f.line1
+		for n = f.line1, f.line2 do
+			local text = rawLine(R, n)
+			size = size + #text + 8
+			if size > maxChars and n > f.line1 then
+				b.cutAt = n
+				break
+			end
+			lines[#lines + 1] = n .. ": " .. text
+			b.lastLine = n
+		end
+		b.code = table.concat(lines, "\n")
+		return b
+	end
+
+	-- A bundle as the text an agent reads (where: the script's path, to head it).
+	function A.BundleText(b, where)
+		local out = {}
+		local function add(text) out[#out + 1] = text end
+		if where then add(where) end
+		add(("%s   (lines %d-%d%s)"):format(b.signature, b.line1, b.line2, b.main and ", the main chunk" or ""))
+		add("")
+		local from = {}
+		for _, c in ipairs(b.callers) do from[#from + 1] = ("%s (line %d)"):format(c.name == "<main>" and "the main chunk" or c.name, c.line) end
+		add(#from > 0 and ("Called from: " .. table.concat(from, "; ")) or "Called from: nothing in this script calls it directly (a callback, an event handler, or used from another script)")
+		local calls = {}
+		for _, c in ipairs(b.calls) do calls[#calls + 1] = ("%s (line %d)%s"):format(c.text, c.line, c.inScript and (" -> " .. c.inScript) or "") end
+		add(#calls > 0 and ("Calls: " .. table.concat(calls, "; ") .. (b.moreCalls and "; and more" or "")) or "Calls: nothing")
+		if #b.remotes > 0 then
+			add("")
+			add("Remote, HTTP and loadstring calls:")
+			for _, r in ipairs(b.remotes) do
+				add(("  line %d: %s %s%s (%d argument%s: %s)"):format(r.line, r.kind, r.method or "",
+					r.path and (" on " .. r.path .. (r.resolved and "" or " (not resolved to an instance)")) or "",
+					r.argCount, r.argCount == 1 and "" or "s", table.concat(r.args, ", ")))
+			end
+		end
+		if #b.locals > 0 then
+			add("")
+			local names = {}
+			for _, l in ipairs(b.locals) do names[#names + 1] = ("%s (%sline %d)"):format(l.name, l.param and "parameter, " or "", l.line) end
+			add("Locals named by the decompiler (apply_names renames these): " .. table.concat(names, ", "))
+		end
+		add("")
+		add(("Code (lines %d-%d%s):"):format(b.line1, b.lastLine, b.cutAt and (", cut here: " .. (b.line2 - b.lastLine) .. " more lines") or ""))
+		add(b.code)
+		return table.concat(out, "\n")
+	end
+
+	-- Checks renames asked for by name ({from, name, line}; line, where the variable is declared, is only
+	-- needed when the name is used more than once) and picks the ones that can be made together:
+	-- {ok = {{tok, sym, from, name, line}}, rejected = {{from, name, why}}}. Only locals the decompiler
+	-- named are renamed: what the user named stays theirs. opts.maxLen is the longest new name (40).
+	function A.PlanRenames(R, requests, opts)
+		local maxLen = opts and opts.maxLen or 40
+		local ok, rejected, taken, byName = {}, {}, {}, {}
+		for _, sym in ipairs(R.syms) do
+			if sym.decl then
+				local list = byName[sym.name]
+				if not list then
+					list = {}
+					byName[sym.name] = list
+				end
+				list[#list + 1] = sym
+			end
+		end
+		local function reject(from, name, why)
+			rejected[#rejected + 1] = {from = tostring(from), name = tostring(name), why = why}
+		end
+
+		for _, req in ipairs(requests) do
+			local from, name, line = req.from, req.name, req.line
+			if type(from) ~= "string" or type(name) ~= "string" then
+				reject(from, name, "from and name have to be text")
+			elseif #name > maxLen then
+				reject(from, name, "the new name is longer than " .. maxLen .. " characters")
+			else
+				local candidates = {}
+				for _, sym in ipairs(byName[from] or {}) do
+					if not line or R.tl[sym.decl] == line then candidates[#candidates + 1] = sym end
+				end
+				if #candidates == 0 then
+					reject(from, name, line and ("no local called '" .. from .. "' is declared on line " .. line) or ("no local is called '" .. from .. "' (it may be renamed already)"))
+				elseif #candidates > 1 then
+					local lines = {}
+					for _, sym in ipairs(candidates) do lines[#lines + 1] = tostring(R.tl[sym.decl]) end
+					reject(from, name, "more than one local is called '" .. from .. "' (declared on lines " .. table.concat(lines, ", ") .. "): give the line")
+				else
+					local sym = candidates[1]
+					local fine, reason = A.CanRename(R, sym.decl, name)
+					if not A.LooksGenerated(sym.name) then
+						reject(from, name, "'" .. from .. "' was not named by the decompiler, so it is left as it is")
+					elseif not fine then
+						reject(from, name, reason)
+					elseif taken[sym] then
+						reject(from, name, "that variable is already renamed in this request")
+					else
+						local clash = false
+						for _, other in ipairs(ok) do
+							if other.name == name and other.sym.decl <= (sym.e or R.n) and sym.decl <= (other.sym.e or R.n) then
+								clash = true
+								break
+							end
+						end
+						if clash then
+							reject(from, name, "another rename in this request uses '" .. name .. "' in an overlapping scope")
+						else
+							taken[sym] = true
+							ok[#ok + 1] = {tok = sym.decl, sym = sym, from = from, name = name, line = R.tl[sym.decl]}
+						end
+					end
+				end
+			end
+		end
+		return {ok = ok, rejected = rejected}
+	end
+
+	-- What a rule may use when someone else wrote it. A rule is one expression of args (the call's
+	-- arguments), run for every call the game makes through the remote: it may compare, calculate, read
+	-- properties and call a few functions that only read. It may not assign, define a function or call
+	-- anything else.
+	local ruleGlobals = {type = true, typeof = true, tostring = true, tonumber = true, select = true, math = true, string = true, table = true, game = true, workspace = true, Enum = true}
+	local ruleFunctions = {type = true, typeof = true, tostring = true, tonumber = true, select = true}
+	local ruleLibraries = {math = true, string = true, table = true}
+	local ruleTableFunctions = {find = true, concat = true, unpack = true}
+	local ruleBanned = {rep = true, randomseed = true} -- (rep can build a string as big as memory)
+	local ruleMethods = {}
+	for name in ("IsA IsDescendantOf IsAncestorOf FindFirstChild FindFirstChildOfClass FindFirstChildWhichIsA FindFirstAncestor FindFirstAncestorOfClass FindFirstAncestorWhichIsA GetFullName GetAttribute lower upper find match sub len format byte gsub split"):gmatch("%a+") do
+		ruleMethods[name] = true
+	end
+
+	-- nil when text can go in a rule box, else why it can't.
+	function A.RuleProblem(text)
+		if type(text) ~= "string" or text:match("^%s*$") then return "it is empty" end
+		if #text > 500 then return "it is longer than 500 characters" end
+		if text:find("[\r\n]") then return "it has to be on one line" end
+		local ok, R = pcall(A.Analyze, "local args = ...\nreturn " .. text)
+		if not ok then return "it could not be read" end
+		if #R.errors > 0 then return "it is not valid Luau (" .. tostring(R.errors[1].msg) .. ")" end
+		local body = R.root.body.body
+		if #body ~= 2 or body[2].k ~= "Return" then return "it has to be one expression, with nothing before or after it" end
+		if #R.functions > 1 then return "it may not define a function" end
+		for name in pairs(R.globals) do
+			if not ruleGlobals[name] then return "it uses '" .. name .. "', which a rule from an agent may not" end
+		end
+		for _, c in ipairs(R.calls) do
+			local fn = c.fn
+			if c.method then
+				if not ruleMethods[R.tv[c.method]] or ruleBanned[R.tv[c.method]] then return "it calls the method '" .. R.tv[c.method] .. "', which a rule from an agent may not" end
+			elseif fn.k == "Name" and not R.symAt[fn.s] and ruleFunctions[R.tv[fn.s]] then
+				-- type, tostring ...
+			elseif fn.k == "Index" and fn.name and fn.obj.k == "Name" and not R.symAt[fn.obj.s] and ruleLibraries[R.tv[fn.obj.s]]
+				and (R.tv[fn.obj.s] ~= "table" or ruleTableFunctions[R.tv[fn.name]]) and not ruleBanned[R.tv[fn.name]] then
+				-- math.floor, string.find, table.find ...
+			else
+				return "it calls " .. A.Text(R, fn.s, fn.e, 40) .. ", which a rule from an agent may not"
+			end
+		end
+		return nil
+	end
+
 	return A
 end
 

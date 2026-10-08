@@ -16,3 +16,7 @@
 # Misc
 .DS_Store
 /sourcemap.json
+
+# The AI relay (mcp/): its token, and Python's caches
+/mcp/.token
+__pycache__/

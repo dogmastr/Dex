@@ -1,4 +1,4 @@
---[[
+	--[[
 	Remote Spy App Module
 
 	The game's remote calls as they happen. Outgoing: what its scripts send to the server (FireServer and
@@ -14,7 +14,7 @@
 
 -- Common Locals
 local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, ScriptViewer -- Major Apps
+local Explorer, ScriptViewer, Analysis -- Major Apps
 local env,service,createSimple -- Main Locals
 
 local function initDeps(data)
@@ -31,6 +31,7 @@ end
 local function initAfterMain()
 	Explorer = Apps.Explorer
 	ScriptViewer = Apps.ScriptViewer
+	Analysis = Apps.ScriptAnalysis
 end
 
 local function main()
@@ -1394,6 +1395,102 @@ end)]]
 			tab, filter = "Out", "All"
 			search:SetText("") -- (so that its row is in sight)
 			pick(log)
+		end
+
+		-- The AI window (Agent.lua; what the agent is told is in mcp/tools.json): the calls that were caught,
+		-- and a rule put in the Rules window for the user to read and save
+		if Apps.Agent then
+			local Agent = Apps.Agent
+			local reg = Agent.Register
+
+			local function clip(text, max)
+				return #text > max and (text:sub(1, max).."... ("..(#text - max).." more characters)") or text
+			end
+
+			-- the remote a path or name stands for, among those seen in one direction
+			local function logNamed(dir, ref)
+				if type(ref) ~= "string" or ref == "" then error("remote is needed: its path or name, as remote_log lists them", 0) end
+				local want = ref:lower():gsub("^game%.", "")
+				local exact, partial = {}, {}
+				for _, log in ipairs(logs[dir]) do
+					if log.Path:lower() == want or log.Name:lower() == want then
+						exact[#exact+1] = log
+					elseif log.Lower:find(want, 1, true) then
+						partial[#partial+1] = log
+					end
+				end
+				local matches = #exact > 0 and exact or partial
+				if #matches == 1 then return matches[1] end
+				if #matches == 0 then
+					error(("no remote called '%s' has been seen (%s): remote_log without a remote lists them"):format(ref, dir == "Out" and "sent by the game" or "sent by the server"), 0)
+				end
+				local names = {}
+				for i = 1, math.min(#matches, 5) do names[i] = matches[i].Path end
+				error(("%d remotes match '%s': %s. Use the full path"):format(#matches, ref, table.concat(names, ", ")), 0)
+			end
+
+			local function text(args)
+				local ok, written = pcall(argList, args)
+				return clip(ok and written or "?", 600)
+			end
+
+			reg("remote_log", function(args)
+				local dir = args.direction == "In" and "In" or "Out"
+				if args.remote == nil then
+					local out = {}
+					for _, log in ipairs(logs[dir]) do
+						out[#out+1] = {remote = log.Path, class = log.Remote.ClassName, calls = log.Count,
+							blocked = (dir == "Out" and spy.Block[log.Remote]) and true or nil, rule = (dir == "Out" and spy.Rules[log.Remote]) and true or nil}
+					end
+					table.sort(out, function(a, b) return a.calls > b.calls end)
+					local total = #out
+					for i = 101, total do out[i] = nil end
+					return {direction = dir, spyRunning = spy.On and true or false, total = total, remotes = out}
+				end
+
+				local log = logNamed(dir, args.remote)
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 5), 1, 20)
+				local calls = {}
+				for i = #log.Calls, math.max(1, #log.Calls - limit + 1), -1 do
+					local call = log.Calls[i]
+					local entry = {at = call.At, method = call.Method, args = text(call.Args), blocked = call.Blocked and true or nil}
+					if call.Returned then entry.returned = text(call.Returned) end
+					if call.Sent then entry.sentInstead = text(call.Sent) end
+					if call.Script then
+						local ok, path = pcall(getFullName, call.Script)
+						entry.script, entry.scriptPath = Agent.IdOf(call.Script), ok and path or nil
+					end
+					if call.Function and call.Function ~= "" then entry["function"] = call.Function end
+					if call.Line and call.Line > 0 then entry.runtimeLine = call.Line end -- (a line of the running script, not of the decompile)
+					calls[#calls+1] = entry
+				end
+				local rule = dir == "Out" and spy.Rules[log.Remote]
+				return {remote = log.Path, class = log.Remote.ClassName, direction = dir, calls = log.Count, blocked = (dir == "Out" and spy.Block[log.Remote]) and true or nil,
+					rule = rule and {when = rule.WhenText, args = rule.ArgsText} or nil, newest = calls}
+			end)
+
+			reg("suggest_rule", function(args)
+				if RemoteSpy.Unavailable then error(RemoteSpy.Unavailable, 0) end
+				if not env.loadstring then error("Your executor has no loadstring, which rules need", 0) end
+				local when = type(args.when) == "string" and trim(args.when) or ""
+				local replace = type(args.args) == "string" and trim(args.args) or ""
+				if when == "" and replace == "" then error("give when, args or both", 0) end
+				for _, part in ipairs({{"when", when}, {"args", replace}}) do
+					if part[2] ~= "" then
+						local problem = Analysis.RuleProblem(part[2])
+						if problem then error(("%s was not accepted: %s"):format(part[1], problem), 0) end
+						local fn, why = RemoteSpy.Compile(part[2])
+						if not fn then error(("%s is not valid Luau: %s"):format(part[1], why), 0) end
+					end
+				end
+				local log = logNamed("Out", args.remote)
+				showRules(log)
+				if when ~= "" then rules.Parts[1].Box.Text = when end
+				if replace ~= "" then rules.Parts[2].Box.Text = replace end
+				rules.Refresh(true)
+				return {remote = log.Path, when = when ~= "" and when or nil, args = replace ~= "" and replace or nil,
+					note = "The Rules window shows it. Nothing is on until the user presses Save."}
+			end)
 		end
 
 		-- The first time the window opens, the spy starts by itself

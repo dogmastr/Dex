@@ -1,5 +1,5 @@
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, RemoteSpy, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Lib
+local Main, Explorer, Properties, ScriptViewer, Console, RemoteSpy, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, Agent, DefaultSettings, Lib
 local API, RMD
 
 -- Default Settings
@@ -144,9 +144,9 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","RemoteSpy","SaveInstance","ModelViewer","SettingsWindow","CommandPalette"}
+	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","RemoteSpy","SaveInstance","ModelViewer","SettingsWindow","CommandPalette","Agent"}
 	Main.Elevated = false
-	Main.Version = "4.0"
+	Main.Version = "4.1"
 	Main.DefaultSettings = DefaultSettings -- what Reset buttons in the settings go back to
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
@@ -414,6 +414,7 @@ Main = (function()
 		ModelViewer = Apps.ModelViewer
 		SettingsWindow = Apps.SettingsWindow
 		CommandPalette = Apps.CommandPalette
+		Agent = Apps.Agent
 		
 		
 		local appTable = {
@@ -515,6 +516,7 @@ Main = (function()
 			return false
 		end
 		env.request = (syn and syn.request) or (http and http.request) or http_request or (fluxus and fluxus.request) or request
+		env.websocket = (WebSocket and WebSocket.connect) or (syn and syn.websocket and syn.websocket.connect) or nil
 		
 		env.isdecompile = function()
 			return typeof(decompile) == "function" or typeof(getscriptbytecode) == "function" or false
@@ -1408,6 +1410,8 @@ Main = (function()
 		
 		Main.CreateApp({Name = "3D Viewer", IconMap = Main.LargeIcons, Icon = "Object", Window = ModelViewer.Window})
 
+		Main.CreateApp({Name = "AI", IconMap = Main.LargeIcons, Icon = "Output", Window = Agent.Window})
+
 		
 		for _, loadedplugin in pairs(Main.Plugins) do
 			Main.CreateApp({Name = loadedplugin.PluginData.FriendlyName, IconMap = Explorer.ClassIcons, Icon = "Attachment", Window = loadedplugin.Window})
@@ -1558,6 +1562,7 @@ Main = (function()
 		ModelViewer.Init()
 		SettingsWindow.Init()
 		CommandPalette.Init()
+		Agent.Init()
 		
 		
 		-- (the listing fails where the folder could not be made: no plugins then, and OpenDex still starts)

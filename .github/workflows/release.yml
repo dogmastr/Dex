@@ -14,6 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 build.py
-      - run: gh release create "$GITHUB_REF_NAME" out.lua --title "OpenDex ${GITHUB_REF_NAME#v}" --generate-notes || gh release upload "$GITHUB_REF_NAME" out.lua --clobber
+      # The title is the tag's message when it has one (git tag -a v4.1 -m "OpenDex 4.1 [AI Support]"), else "OpenDex 4.1"
+      - run: |
+          git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          TITLE="OpenDex ${GITHUB_REF_NAME#v}"
+          if [ "$(git cat-file -t "$GITHUB_REF_NAME")" = tag ]; then TITLE="$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")"; fi
+          gh release create "$GITHUB_REF_NAME" out.lua --title "$TITLE" --generate-notes || gh release upload "$GITHUB_REF_NAME" out.lua --clobber
         env:
           GH_TOKEN: ${{ github.token }}

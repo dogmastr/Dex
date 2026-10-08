@@ -3755,6 +3755,7 @@ local function main()
 			renderEdit()
 			toast(("Renamed %d variables"):format(#list), "success")
 		end
+		Tools.applyNames = applyNames -- (the AI window's apply_names uses it too)
 
 		Tools.suggestNames = function()
 			local R, why = tabAnalysis()
@@ -6761,6 +6762,7 @@ local function main()
 			end
 		end))
 
+		if Apps.Agent then Tools.registerAgent(Apps.Agent) end
 		Main.AddCommands(getCommands)
 	end
 
@@ -6829,6 +6831,263 @@ local function main()
 	-- Explorer: "Find in Scripts" on an object: every script that has its name as a word
 	ScriptViewer.FindInScripts = function(inst)
 		Tools.openSearch(inst.Name, "word")
+	end
+
+	----------------------------------------------------------------------------------------------
+	-- The AI window: what an agent can ask of the viewer (Agent.lua runs the calls, mcp/tools.json says
+	-- what the agent is told). Lines are lines of the raw decompile, as ViewScript and the search
+	-- results use them. Reading never changes what the user sees; apply_names, note and open show the
+	-- script in the viewer, because that is where their result is.
+	----------------------------------------------------------------------------------------------
+
+	Tools.registerAgent = function(Agent)
+		local reg = Agent.Register
+		local MAX_LINES, MAX_CHARS = 400, 40000
+		local analyses, analysisOrder = {}, {}
+
+		-- the script an id or a path stands for
+		local function scriptFor(ref)
+			if type(ref) ~= "string" or ref == "" then
+				error("script is needed: an id such as s17 (from scripts or context), or a full path", 0)
+			end
+			local known = Agent.Lookup(ref)
+			if known then return known end
+			local want = ref:lower():gsub("^game%.", "")
+			local matches = {}
+			for _,scr in ipairs(Tools.scriptList()) do
+				if Tools.fullName(scr):lower() == want then matches[#matches+1] = scr end
+			end
+			if #matches == 1 then return matches[1] end
+			if #matches == 0 then error(("no script has the id or path '%s' (scripts lists them)"):format(ref), 0) end
+			local ids = {}
+			for i = 1, math.min(#matches, 5) do ids[i] = Agent.IdOf(matches[i]) end
+			error(("%d scripts have that path (%s): use an id"):format(#matches, table.concat(ids, ", ")), 0)
+		end
+
+		-- the raw decompile of a script: what its tab has, else what has been read, else a fresh decompile
+		local function rawOf(scr)
+			local i = findTab(scr)
+			if i and tabs[i].Raw then return tabs[i].Raw end
+			local ok, known = pcall(Tools.textOf, scr)
+			if ok and type(known) == "string" then return known end
+			local text, good, raw = decompileScript(scr)
+			if good then return raw end
+			error("the script could not be decompiled: "..(text:match("%-%- Reason: ([^\n]*)") or "no reason given"), 0)
+		end
+
+		-- the last few analyses, so that asking about several functions of a script parses it once
+		local function analysisOf(raw)
+			local R = analyses[raw]
+			if R then return R end
+			if #raw > 3000000 then error("the script is too large to analyze", 0) end
+			local ok, result = pcall(Analysis.Analyze, raw)
+			if not ok then error("analysis failed: "..tostring(result), 0) end
+			analyses[raw] = result
+			analysisOrder[#analysisOrder+1] = raw
+			if #analysisOrder > 6 then analyses[table.remove(analysisOrder, 1)] = nil end
+			return result
+		end
+
+		local function whereIs(scr)
+			return ("%s (%s)"):format(Tools.fullName(scr), Agent.IdOf(scr))
+		end
+
+		-- shows a script in the viewer and returns its tab, which has to be the one in front with its source in
+		local function openTab(scr)
+			ScriptViewer.ViewScript(scr)
+			local i = findTab(scr)
+			local tab = i and tabs[i]
+			if not tab or tabs[activeTab] ~= tab then error("the script could not be opened in the viewer", 0) end
+			if tab.Loading or tab.Failed or not tab.Ann then error("the script has no source to work in (it could not be decompiled)", 0) end
+			return tab
+		end
+
+		reg("context", function()
+			local out = {tabs = {}, selected = {}}
+			for _,tab in ipairs(tabs) do
+				if tab.Kind == "script" and tab.Script then
+					out.tabs[#out.tabs+1] = {script = Agent.IdOf(tab.Script), path = Tools.fullName(tab.Script), active = tabs[activeTab] == tab or nil}
+				end
+			end
+			local tab = tabs[activeTab]
+			if tab and tab.Kind == "script" and tab.Script then
+				out.script, out.path = Agent.IdOf(tab.Script), Tools.fullName(tab.Script)
+				if tab.Raw and not tab.Loading and not tab.Failed then
+					local offset = tab.Offset or 0
+					local line = cursorLine() - offset
+					if line >= 1 then
+						out.line = line
+						local text = rawLines(tab)[line]
+						out.lineText = text and text:gsub("^%s+", ""):sub(1, 200)
+					end
+					local R = tabAnalysis()
+					local fn = R and Analysis.FunctionAtLine(R, cursorLine())
+					if fn and fn.parent then
+						out["function"] = Analysis.FunctionName(R, fn)
+						out.functionLines = {fn.line1 - offset, fn.line2 - offset}
+					end
+				end
+			end
+			for _,node in ipairs(selection.List) do
+				if #out.selected >= 10 then
+					out.moreSelected = true
+					break
+				end
+				local obj = node.Obj
+				local ok, path = pcall(obj.GetFullName, obj)
+				local entry = {path = ok and path or tostring(obj), class = obj.ClassName}
+				local isScript, yes = pcall(obj.IsA, obj, "LuaSourceContainer")
+				if isScript and yes then entry.script = Agent.IdOf(obj) end
+				out.selected[#out.selected+1] = entry
+			end
+			return out
+		end)
+
+		reg("scripts", function(args)
+			local limit = math.clamp(math.floor(tonumber(args.limit) or 50), 1, 200)
+			local query = type(args.query) == "string" and args.query ~= "" and args.query:lower() or nil
+			local out, total = {}, 0
+			for _,scr in ipairs(Tools.scriptList()) do
+				local path = Tools.fullName(scr)
+				if not query or path:lower():find(query, 1, true) then
+					total = total + 1
+					if #out < limit then out[#out+1] = {id = Agent.IdOf(scr), path = path, class = scr.ClassName} end
+				end
+			end
+			return {total = total, shown = #out, scripts = out}
+		end)
+
+		reg("outline", function(args)
+			local scr = scriptFor(args.script)
+			local R = analysisOf(rawOf(scr))
+			local out, more = {}, false
+			for _,o in ipairs(Analysis.Outline(R)) do
+				if o.fn.parent then
+					if #out >= 400 then
+						more = true
+						break
+					end
+					out[#out+1] = {name = o.name, line = o.line1, last = o.line2, depth = o.depth}
+				end
+			end
+			return {script = Agent.IdOf(scr), path = Tools.fullName(scr), lines = #R.nl + 1, functions = out, truncated = more or nil}
+		end)
+
+		reg("source", function(args)
+			local scr = scriptFor(args.script)
+			local lines = {}
+			for line in (rawOf(scr).."\n"):gmatch("(.-)\r?\n") do lines[#lines+1] = line end
+			if lines[#lines] == "" then lines[#lines] = nil end
+			local from = math.max(1, math.floor(tonumber(args.from) or 1))
+			if from > #lines then error(("the script has %d lines"):format(#lines), 0) end
+			local to = math.min(math.floor(tonumber(args.to) or (from + 199)), #lines, from + MAX_LINES - 1)
+			if to < from then error("to is before from", 0) end
+			local out, size = {}, 0
+			for n = from, to do
+				size = size + #lines[n] + 8
+				if size > MAX_CHARS and n > from then
+					to = n - 1
+					break
+				end
+				out[#out+1] = n..": "..lines[n]
+			end
+			local more = to < #lines and ("\n... more follows: ask again with from=%d"):format(to + 1) or ""
+			return ("%s, lines %d-%d of %d\n%s%s"):format(whereIs(scr), from, to, #lines, table.concat(out, "\n"), more)
+		end)
+
+		reg("function", function(args)
+			local scr = scriptFor(args.script)
+			local R = analysisOf(rawOf(scr))
+			local f
+			if args.line ~= nil then
+				local line = math.floor(tonumber(args.line) or 0)
+				if line < 1 or line > #R.nl + 1 then error(("line %s is outside the script (it has %d lines)"):format(tostring(args.line), #R.nl + 1), 0) end
+				f = Analysis.FunctionAtLine(R, line)
+			elseif type(args.name) == "string" and args.name ~= "" then
+				local found = {}
+				for _,fn in ipairs(R.functions) do
+					if fn.parent and (Analysis.FunctionName(R, fn) == args.name or Analysis.ShortName(fn) == args.name or Analysis.Signature(R, fn) == args.name) then found[#found+1] = fn end
+				end
+				if #found == 0 then error(("no function is called '%s' in this script (outline lists them)"):format(args.name), 0) end
+				if #found > 1 then
+					local at = {}
+					for i = 1, math.min(#found, 8) do at[i] = tostring(found[i].line1) end
+					error(("%d functions are called '%s' (they start on lines %s): give a line"):format(#found, args.name, table.concat(at, ", ")), 0)
+				end
+				f = found[1]
+			else
+				error("give a line inside the function, or its name (outline lists the functions)", 0)
+			end
+			return Analysis.BundleText(Analysis.FunctionBundle(R, f), whereIs(scr))
+		end)
+
+		reg("annotations", function(args)
+			local scr = scriptFor(args.script)
+			local i = findTab(scr)
+			local tab = i and tabs[i]
+			local ann, current
+			if tab and tab.Ann then
+				ann, current = tab.Ann, true
+			else
+				local file = readAnnFile(scr)
+				if file and type(file.sets) == "table" then
+					ann = file.sets[checksum(rawOf(scr))]
+					current = ann ~= nil
+					ann = ann or newestSet(file)
+				end
+			end
+			local out = {script = Agent.IdOf(scr), path = Tools.fullName(scr), renames = {}, notes = {}}
+			if not ann then return out end
+			local offset = (tab and tab.Ann == ann and tab.Offset) or ann.off or 0
+			for _,r in ipairs(ann.renames or {}) do out.renames[#out.renames+1] = {from = r.orig, to = r.name} end
+			for _,c in ipairs(ann.comments or {}) do out.notes[#out.notes+1] = {line = c.line - offset, text = c.text} end
+			if not current then out.note = "these were saved for an earlier version of the script" end
+			return out
+		end)
+
+		reg("apply_names", function(args)
+			local scr = scriptFor(args.script)
+			if type(args.names) ~= "table" or #args.names == 0 then error("names is needed: a list of {from, name}", 0) end
+			if #args.names > 60 then error("at most 60 names at a time", 0) end
+			local tab = openTab(scr)
+			local R, why = tabAnalysis()
+			if not R then error(why, 0) end
+			local offset = tab.Offset or 0
+			local requests = {}
+			for _,n in ipairs(args.names) do
+				requests[#requests+1] = {from = type(n) == "table" and n.from or nil, name = type(n) == "table" and n.name or nil, line = type(n) == "table" and tonumber(n.line) and (math.floor(n.line) + offset) or nil}
+			end
+			local plan = Analysis.PlanRenames(R, requests, {maxLen = 40})
+			if #plan.ok > 0 then Tools.applyNames(R, plan.ok) end
+			local applied = {}
+			for _,o in ipairs(plan.ok) do applied[#applied+1] = {from = o.from, name = o.name, line = o.line - offset} end
+			return {script = Agent.IdOf(scr), applied = applied, rejected = plan.rejected}
+		end)
+
+		reg("note", function(args)
+			local scr = scriptFor(args.script)
+			local line = math.floor(tonumber(args.line) or 0)
+			local text = type(args.text) == "string" and args.text:gsub("%c", " "):gsub("^%s+", ""):gsub("%s+$", "") or ""
+			if text == "" then error("text is needed", 0) end
+			if #text > 300 then error("the note is longer than 300 characters", 0) end
+			local tab = openTab(scr)
+			local viewerLine = line + (tab.Offset or 0)
+			if line < 1 or not codeFrame.Lines[viewerLine] then error(("line %d is outside the script"):format(line), 0) end
+			local existing = noteOn(viewerLine)
+			if existing ~= "" and existing:sub(1, 3) ~= "AI:" then
+				error(("line %d already has a note of the user's (%s): pick another line"):format(line, existing:sub(1, 40)), 0)
+			end
+			setNote(viewerLine, "AI: "..text)
+			return {script = Agent.IdOf(scr), line = line, note = "AI: "..text}
+		end)
+
+		reg("open", function(args)
+			local scr = scriptFor(args.script)
+			local line = args.line ~= nil and math.floor(tonumber(args.line) or 0) or nil
+			if line and line < 1 then error("line has to be 1 or more", 0) end
+			ScriptViewer.ViewScript(scr, line)
+			return {opened = whereIs(scr), line = line}
+		end)
 	end
 
 	return ScriptViewer

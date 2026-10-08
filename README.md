@@ -45,6 +45,13 @@ loadstring(game:HttpGet("https://github.com/dogmastr/OpenDex/releases/latest/dow
 - **As code:** a call is written out as the Luau that makes it again, with the remote's path. Copy it, resend it from the window, or copy a hook snippet for the remote.
 - **Block, rules and hide:** stop a remote from firing, or leave a noisy remote out of the list. A rule blocks only the calls a Luau condition names, or sends other arguments in place of the game's. Its window shows the picked call's arguments to click, can write the condition from that call (**Block calls like this**), tries the rule on the call before it is saved, and says when a rule breaks.
 
+### AI window
+
+- **Your editor's AI, on the game:** the **AI** window connects OpenDex to Claude Code, VS Code, Codex, Cursor, Antigravity or opencode through a small relay program (Python, nothing to install; it is in the [`mcp`](./mcp) folder). The AI can list the game's scripts, read a function with its callers, its calls and the remotes it fires, read the Remote Spy's calls, name the variables a decompiler made up (`v12`), write notes on lines and suggest a Remote Spy rule.
+- **What it changes:** names go through the same checks as Apply all and are saved like any rename; a note starts with `AI:` and never replaces one of yours; a rule is only put in the Rules window for you to read and save.
+- **What it cannot do:** run code in the game, fire or block a remote, or turn a rule on. What comes from the game is data to it, never instructions. The window lists every request.
+- **Set it up:** [mcp/README.md](./mcp/README.md).
+
 ### Everything else
 
 - **Console:** the game's output with a search box and a switch per kind of message, and a command box with history.
@@ -69,6 +76,7 @@ OpenDex starts with whatever the executor has. A feature it cannot run is greyed
 | Remote Spy: what the game sends, blocking remotes | `hookmetamethod`, `getnamecallmethod` (and `hookfunction` for calls written `remote.FireServer(remote)`) |
 | Remote Spy: what the server sends | `getconnections` for events, `getcallbackvalue` for invokes |
 | Remote Spy: rules | `loadstring` |
+| AI window | `WebSocket` (and a relay program on the PC, see [`mcp`](./mcp)) |
 
 ## Files it writes
 
@@ -82,6 +90,7 @@ Everything goes in the executor's workspace folder.
 | `dex/cache/` | Every script that was decompiled, by hash, and an index per place. A cached script opens without the decompiler. |
 | `dex/annotations/` | Renames and notes, one file per script. |
 | `dex/recent.json` | The scripts opened lately, per place. |
+| `dex/agent.json` | The AI window's switch, port and the relay's token. |
 | `dex/plugins/` | Your plugins (see below). |
 
 Save Instance and "Save script" write their files next to the `dex` folder. Deleting `dex` is safe: you lose the annotations and your plugins, and everything else is made again.
