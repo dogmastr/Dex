@@ -3956,7 +3956,6 @@ local function main()
 		local LONG_LINE = 4000
 
 		local tweenService = service.TweenService
-		local lineTweens = {}
 
 		local function initBuiltIn()
 			local env = getfenv()
@@ -4133,8 +4132,11 @@ local function main()
 			editBox.Visible = false
 			editBox.Parent = frame
 
-			lineTweens.Invis = tweenService:Create(cursor,TweenInfo.new(0.4,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{BackgroundTransparency = 1})
-			lineTweens.Vis = tweenService:Create(cursor,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{BackgroundTransparency = 0})
+			-- (a pair per code frame: with one pair for all, the newest frame's cursor would blink for every frame)
+			elems.CursorTweens = {
+				Invis = tweenService:Create(cursor,TweenInfo.new(0.4,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{BackgroundTransparency = 1}),
+				Vis = tweenService:Create(cursor,TweenInfo.new(0.2,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),{BackgroundTransparency = 0}),
+			}
 
 			elems.LinesFrame = linesFrame
 			elems.LineNumbersLabel = lineNumbersLabel
@@ -4266,6 +4268,9 @@ local function main()
 						self:UpdateCursor()
 						self:Refresh()
 					end)
+				elseif keycode == keycodes.Backspace then
+					-- (the hidden box is empty, so Backspace changes nothing in it and OnTyped is not told: this is)
+					if self.OnBackspace and not self:IsValidRange() then self.OnBackspace() end
 				elseif service.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
 					if keycode == keycodes.A then
 						self.SelectionRange = {{0,0},{#self.Lines[#self.Lines],#self.Lines-1}}
@@ -4310,6 +4315,7 @@ local function main()
 
 		funcs.CursorAnim = function(self,on)
 			local cursor = self.GuiElems.Cursor
+			local lineTweens = self.GuiElems.CursorTweens
 			local animTime = tick()
 			self.LastAnimTime = animTime
 

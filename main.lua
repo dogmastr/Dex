@@ -1,5 +1,5 @@
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Lib
+local Main, Explorer, Properties, ScriptViewer, Console, RemoteSpy, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Lib
 local API, RMD
 
 -- Default Settings
@@ -144,9 +144,9 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","SaveInstance","ModelViewer","SettingsWindow","CommandPalette"}
+	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","RemoteSpy","SaveInstance","ModelViewer","SettingsWindow","CommandPalette"}
 	Main.Elevated = false
-	Main.Version = "3.1"
+	Main.Version = "4.0"
 	Main.DefaultSettings = DefaultSettings -- what Reset buttons in the settings go back to
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
@@ -281,9 +281,10 @@ Main = (function()
 		task.spawn(Lib.Window.ApplyLayout, layout)
 	end
 
-	-- Opens the windows where they were left (the Explore layout the first time).
+	-- Opens the windows: the Explore layout, except when OpenDex is run again in the same game, which keeps
+	-- the windows where the run before left them. What was open on an earlier visit is not remembered.
 	Main.Layout.Restore = function()
-		local layout = Main.Layout.Saved
+		local layout = Main.Reloaded and Main.Layout.Saved
 		if type(layout) ~= "table" or type(layout.windows) ~= "table" then layout = Main.LayoutPresets.Explore end
 
 		-- the right panel slides in a moment after the windows are set up, as it always did
@@ -408,6 +409,7 @@ Main = (function()
 		Properties = Apps.Properties
 		ScriptViewer = Apps.ScriptViewer
 		Console = Apps.Console
+		RemoteSpy = Apps.RemoteSpy
 		SaveInstance = Apps.SaveInstance
 		ModelViewer = Apps.ModelViewer
 		SettingsWindow = Apps.SettingsWindow
@@ -419,6 +421,7 @@ Main = (function()
 			Properties = Properties,
 			ScriptViewer = ScriptViewer,
 			Console = Console,
+			RemoteSpy = RemoteSpy,
 			SaveInstance = SaveInstance,
 			ModelViewer = ModelViewer,
 			SettingsWindow = SettingsWindow
@@ -485,6 +488,13 @@ Main = (function()
 		env.hookfunction = hookfunction
 		env.hookmetamethod = hookmetamethod
 		env.restorefunction = restorefunction
+		env.getnamecallmethod = getnamecallmethod
+		env.newcclosure = newcclosure
+		env.checkcaller = checkcaller
+		env.firesignal = firesignal
+		env.getcallbackvalue = getcallbackvalue
+		env.getthreadidentity = getthreadidentity or getidentity
+		env.setthreadidentity = setthreadidentity or setidentity
 
 		-- other
 		env.getscriptbytecode = getscriptbytecode
@@ -1391,7 +1401,9 @@ Main = (function()
 		Main.CreateApp({Name = "Script Viewer", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
 		Main.CreateApp({Name = "Console", IconMap = Main.LargeIcons, Icon = "Executor", Window = Console.Window})
-		
+
+		Main.CreateApp({Name = "Remote Spy", IconMap = Main.LargeIcons, Icon = "Watcher", Window = RemoteSpy.Window})
+
 		Main.CreateApp({Name = "Save Instance", IconMap = Main.LargeIcons, Icon = "Book", Window = SaveInstance.Window})
 		
 		Main.CreateApp({Name = "3D Viewer", IconMap = Main.LargeIcons, Icon = "Object", Window = ModelViewer.Window})
@@ -1433,8 +1445,23 @@ Main = (function()
 	end
 
 	Main.Init = function()
+		-- OpenDex run again while it is running: the one before closes first (its layout saved, its windows,
+		-- hooks and loops gone) and hands over what outlives it. It is found in the executor's globals.
+		local globals = getgenv and getgenv()
+		local before = globals and globals.OpenDex
+		Main.Reloaded = type(before) == "table" -- (this very Main too: Reinit, from Apply Now, keeps the windows)
+		if Main.Reloaded and before ~= Main then -- (Reinit has closed this one itself)
+			pcall(function() before.Layout.Flush() end)
+			pcall(before.Uninit)
+			for _, key in ipairs({"RemoteHook", "SynSaveInstance", "AdvancedDecompiler"}) do
+				if Main[key] == nil then Main[key] = before[key] end
+			end
+		end
+		if globals then globals.OpenDex = Main end
+
 		Main.Session = {} -- a new one per run: loops of an earlier run compare against it to know they should stop
 		Main.Elevated = pcall(function() return game:GetService("CoreGui"):GetFullName() end)
+		Main.RemoveGuis() -- (on an executor without getgenv the windows are all that can be found of a run before)
 
 		-- saves new settings if does not exist (settings saved under the old name are carried over)
 		if isfile and not isfile("OpenDexSettings.json") then
@@ -1526,6 +1553,7 @@ Main = (function()
 		Properties.Init()
 		ScriptViewer.Init()
 		Console.Init()
+		RemoteSpy.Init()
 		SaveInstance.Init()
 		ModelViewer.Init()
 		SettingsWindow.Init()
@@ -1575,7 +1603,7 @@ Main = (function()
 		Lib.Window.Init()
 		Main.CreateMainGui()
 		Main.AddCommands(Main.WindowCommands)
-		Main.Layout.Restore() -- Explorer and Properties on the right the first time, then wherever they were left
+		Main.Layout.Restore() -- Explorer and Properties on the right; a run again in the same game keeps the windows as they were
 		Main.Layout.StartAutosave()
 	end
 	
@@ -1596,6 +1624,10 @@ Main = (function()
 		Main.Layout.ResetHandlers = {}
 		Main.AppControls = {}
 		Main.Plugins = {}
+		Main.RemoveGuis()
+	end
+
+	Main.RemoveGuis = function()
 		for _, gui in pairs(Main.GetSecureContainer():GetChildren()) do
 			if string.sub(gui.Name,1,5) == "_ODX_" then -- ODX stands for OpenDex
 				gui:Destroy()

@@ -34,16 +34,23 @@ loadstring(game:HttpGet("https://github.com/dogmastr/OpenDex/releases/latest/dow
 - Cut, copy, paste, duplicate, group, rename and insert objects.
 - **Copy as Code** writes the Luau that rebuilds an object: `Instance.new`, the properties that differ from a new one, attributes and tags.
 - **Find in Scripts** searches every script for the object's name.
-- Remotes: block from firing (a blocked remote is shown in red), find the calling script, see where the game's scripts use it.
+- Remotes: block from firing (a blocked remote is shown in red), open one in the Remote Spy, see where the game's scripts use it.
 - View connections, fire ClickDetectors, ProximityPrompts and TouchTransmitters, play tweens and animations, browse nil instances, click a part to select it.
 - Properties filter as you type, with editors for enums, colours, sequences and attributes. Right-click a property to copy its value (as text or as code), its name or its path.
+
+### Remote Spy
+
+- **Sent and received:** lists what the game's scripts send to the server (`FireServer`, `InvokeServer`) and what the server fires at the client (`OnClientEvent`) or invokes on it (`OnClientInvoke`) as it happens, grouped by remote. Bindables can be listed too.
+- **Each call:** its arguments, what an invoke returned, and the script, function and line that made it. **Go to call** opens that script in the Script Viewer at the call.
+- **As code:** a call is written out as the Luau that makes it again, with the remote's path. Copy it, resend it from the window, or copy a hook snippet for the remote.
+- **Block, rules and hide:** stop a remote from firing, or leave a noisy remote out of the list. A rule blocks only the calls a Luau condition names, or sends other arguments in place of the game's. Its window shows the picked call's arguments to click, can write the condition from that call (**Block calls like this**), tries the rule on the call before it is saved, and says when a rule breaks.
 
 ### Everything else
 
 - **Console:** the game's output with a search box and a switch per kind of message, and a command box with history.
 - **3D Viewer:** preview a model, accessory or folder.
 - **Save Instance:** the executor's `saveinstance`, or USSI as the fallback.
-- **Command palette** for every action, dockable windows with saved layouts, and touch support.
+- **Command palette** for every action, dockable windows with layout presets, and touch support.
 
 ## Build
 
@@ -58,7 +65,10 @@ OpenDex starts with whatever the executor has. A feature it cannot run is greyed
 | Viewing scripts | `decompile`, or `getscriptbytecode` for the other decompilers |
 | Script cache and change tracking | `getscripthash`, `readfile`, `writefile`, `listfiles`, `delfile` |
 | Live values | `getgc`, `getupvalues`, `getconstants`, `setupvalue`, `setconstant` |
-| Tracing, blocking remotes | `hookfunction`, `hookmetamethod` |
+| Tracing | `hookfunction` |
+| Remote Spy: what the game sends, blocking remotes | `hookmetamethod`, `getnamecallmethod` (and `hookfunction` for calls written `remote.FireServer(remote)`) |
+| Remote Spy: what the server sends | `getconnections` for events, `getcallbackvalue` for invokes |
+| Remote Spy: rules | `loadstring` |
 
 ## Files it writes
 
@@ -67,7 +77,7 @@ Everything goes in the executor's workspace folder.
 | Path | What it holds |
 |---|---|
 | `OpenDexSettings.json` | The settings. |
-| `dex/layout.json` | Where the windows were left, and what each one remembers: the Script Viewer's panes, the Console's text size and switches, Save Instance's options. |
+| `dex/layout.json` | What each window remembers: the Script Viewer's panes, the Console's text size and switches, the Remote Spy's Bindables switch, Save Instance's options. Which windows are open is not remembered between visits: OpenDex starts with the Explorer and Properties, and keeps the windows only when it is run again in the same game. |
 | `dex/rbx_api.dat`, `dex/rbx_rmd.dat`, `dex/deps_version.dat` | Roblox's API dump and class metadata. Downloaded again when Roblox updates. |
 | `dex/cache/` | Every script that was decompiled, by hash, and an index per place. A cached script opens without the decompiler. |
 | `dex/annotations/` | Renames and notes, one file per script. |

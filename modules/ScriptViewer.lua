@@ -2837,12 +2837,15 @@ local function main()
 	end
 
 	-- A note is typed on its line: a box (Nav.noteBox) opens where the note is, or goes, at the end of the
-	-- cursor's line. Typing in the code opens it with what was typed, and so do the menus. Enter or a click
-	-- elsewhere keeps the note, Escape leaves it as it was, and an emptied note is removed.
-	local function addNote(typed)
+	-- cursor's line. Typing in the code opens it with what was typed, and so do the menus; Backspace on a
+	-- line with a note opens it with its last character gone (erase). Enter or a click elsewhere keeps the
+	-- note, Escape leaves it as it was, and an emptied note is removed.
+	local function addNote(typed, erase)
 		local tab = tabs[activeTab]
 		if not (tab and tab.Kind == "script" and tab.Ann) then return end
 		local line = cursorLine()
+		local note = noteOn(line)
+		if erase and note == "" then return end
 		scrollToLine(line) -- (the cursor's line may have been scrolled out of sight)
 		local cellW, cellH = math.ceil(codeFrame.FontSize / 2), codeFrame.FontSize
 		local code = (codeFrame.Lines[line] or ""):gsub("%s%-%-%s>>%s.*$", "")
@@ -2851,7 +2854,7 @@ local function main()
 		local x = math.clamp((#code - codeFrame.ViewX) * cellW + markW, markW, math.max(markW, codeFrame.GuiElems.LinesFrame.AbsoluteSize.X - 240))
 		local box = Nav.noteBox
 		Nav.noteLine, Nav.noteTab = line, tab
-		box.Text = noteOn(line)..(typed and typed:gsub("%c", "") or "")
+		box.Text = erase and note:sub(1, (utf8.offset(note, -1) or #note) - 1) or note..(typed and typed:gsub("%c", "") or "")
 		box.Position = UDim2.fromOffset(x, (line - 1 - codeFrame.ViewY) * cellH)
 		box.Size = UDim2.new(1, -x, 0, cellH)
 		box.Visible = true
@@ -6151,6 +6154,7 @@ local function main()
 			if text ~= noteOn(line) then setNote(line, text) end
 		end)
 		codeFrame.OnTyped = addNote -- typing in the code starts a note on the cursor's line
+		codeFrame.OnBackspace = function() addNote(nil, true) end
 
 		-- Right-click on the code: navigate, annotate and look at the running script, for what is under the
 		-- pointer. Ctrl+click on what stands for an instance selects it in the Explorer, on another name it
@@ -6787,6 +6791,32 @@ local function main()
 		local text, ok, raw = decompileScript(scr, nil, known)
 		fillTab(tab, text, ok, raw, known and "Decompile cache" or nil, true)
 		if line and ok and tabs[activeTab] == tab then showLine(line + (tab.Offset or 0), 0) end
+	end
+
+	-- Remote Spy: opens a script at a call it made. Of its calls of that method, the one whose path leads to
+	-- that remote, or failing that the one in a function of that name, is gone to; with neither, the function
+	-- of that name, or the script's only call of the method. Else the script opens at its top.
+	ScriptViewer.ViewCall = function(scr, remote, method, fname)
+		ScriptViewer.ViewScript(scr)
+		local tab = tabs[activeTab]
+		local R = tab and tab.Script == scr and tabAnalysis()
+		if not R then return end
+
+		local best, score, only, count = nil, 0, nil, 0
+		for _, r in ipairs(Analysis.Remotes(R)) do
+			if r.kind == "remote" and r.method == method then
+				count, only = count + 1, r.line
+				local s = (resolveInstance(r.path, scr) == remote and 2 or 0) + (fname ~= "" and r.fn and Analysis.FunctionName(R, r.fn) == fname and 1 or 0)
+				if s > score then best, score = r.line, s end
+			end
+		end
+		if not best and fname and fname ~= "" then
+			for _, f in ipairs(R.functions) do
+				if f.name == fname then best = f.line1 break end
+			end
+		end
+		best = best or (count == 1 and only)
+		if best then showLine(best, 0) end
 	end
 
 	-- Called by Main.Uninit (Reload OpenDex, in the settings): what this viewer changed in the running game

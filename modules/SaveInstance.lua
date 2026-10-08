@@ -1,7 +1,5 @@
 --[[
 	Save Instance App Module
-
-	Revival of the old dex's Save Instance
 ]]
 
 -- Common Locals

@@ -6,7 +6,7 @@
 
 -- Common Locals
 local Main,Lib,Apps,Settings -- Main Containers
-local Properties, ScriptViewer, ModelViewer -- Major Apps
+local Properties, ScriptViewer, ModelViewer, RemoteSpy -- Major Apps
 local API,RMD,env,service,plr,create -- Main Locals
 
 local function initDeps(data)
@@ -27,6 +27,7 @@ local function initAfterMain()
 	Properties = Apps.Properties
 	ScriptViewer = Apps.ScriptViewer
 	ModelViewer = Apps.ModelViewer
+	RemoteSpy = Apps.RemoteSpy
 end
 
 local function main()
@@ -51,12 +52,6 @@ local function main()
 	local addObject,removeObject,moveObject = nil,nil,nil
 
 	local iconData
-	-- The remote hook's tables hang off Main, so they outlive Apply Now: the __namecall hook can't be taken
-	-- out again, and a reloaded Explorer must still be able to unblock what the one before it blocked.
-	local remoteHook = Main.RemoteHook or {Block = {}, Watch = {}, Callers = {}, Pending = {}, Installed = false}
-	Main.RemoteHook = remoteHook
-	local remote_blocklist = remoteHook.Block -- k = blocked remote instance, v = the method name blocked on it (e.g. "FireServer")
-	local remote_watch,remote_callers = remoteHook.Watch,remoteHook.Callers -- Find Caller. watch: k = watched remote, v = its fire method. callers: k = remote, v = {[calling script or false] = {n = calls, t = last print}}
 	nodes = nodes or {}
 	local dirtyParents = {} -- nodes whose child lists contain deleted nodes, compacted by InitDelCleaner
 	local NAME_COLOR = Color3.fromRGB(220,220,220) -- an object's name in the tree (as the row template has it)
@@ -606,6 +601,7 @@ local function main()
 	Explorer.Refresh = function()
 		local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / 20), 0)	
 		local renameNodeVisible = false
+		local blocked = RemoteSpy.Blocked
 
 		for i = 1,maxNodes do
 			local entry = listEntries[i]
@@ -620,8 +616,8 @@ local function main()
 				entry.Position = UDim2.new(0,-scrollH.Index,0,entry.Position.Y.Offset)
 				entry.Size = UDim2.new(0,Explorer.ViewWidth,0,20)
 				entry.Indent.EntryName.Text = tostring(node.Obj)
-				-- a remote that is blocked from firing, or whose callers are being looked for, says so by its colour
-				entry.Indent.EntryName.TextColor3 = (remote_blocklist[obj] and Settings.Theme.Danger) or (remote_watch[obj] and Settings.Theme.Info) or NAME_COLOR
+				-- a remote that is blocked from firing says so by its colour
+				entry.Indent.EntryName.TextColor3 = blocked[obj] and Settings.Theme.Danger or NAME_COLOR
 				entry.Indent.Position = UDim2.new(0,depth,0,0)
 				entry.Indent.Size = UDim2.new(1,-depth,1,0)
 
@@ -1018,21 +1014,16 @@ local function main()
 		if presentClasses["RemoteEvent"] or presentClasses["RemoteFunction"] or presentClasses["UnreliableRemoteEvent"]
 			or presentClasses["BindableEvent"] or presentClasses["BindableFunction"] then
 			-- Block for what is not blocked, Unblock for what is (a blocked remote's name is red in the tree)
-			local blocked,open,watching,seen
+			local blocked,open
 			for i = 1,#sList do
-				local obj = sList[i].Obj
-				if remote_blocklist[obj] then blocked = true else open = true end
-				watching = watching or remote_watch[obj]
-				seen = seen or remote_callers[obj]
+				if RemoteSpy.Blocked[sList[i].Obj] then blocked = true else open = true end
 			end
-			if open then context:AddRegistered("BLOCK_REMOTE", env.hookmetamethod == nil and "Your executor has no hookmetamethod") end
+			if open then context:AddRegistered("BLOCK_REMOTE", RemoteSpy.Unavailable) end
 			if blocked then context:AddRegistered("UNBLOCK_REMOTE") end
 			if presentClasses["RemoteEvent"] or presentClasses["RemoteFunction"] or presentClasses["UnreliableRemoteEvent"] then
 				context:AddRegistered("WHERE_USED", (#sList ~= 1 and "Select a single remote") or (not env.isdecompile() and "Your executor has no decompiler"))
 			end
-			context:AddRegistered("FIND_CALLER", (env.hookmetamethod == nil and "Your executor has no hookmetamethod") or (env.getcallingscript == nil and "Your executor has no getcallingscript"))
-			if watching then context:AddRegistered("STOP_FIND_CALLER") end
-			if seen then context:AddRegistered("SELECT_CALLERS") end
+			context:AddRegistered("SPY_REMOTE", (#sList ~= 1 and "Select a single remote") or RemoteSpy.Unavailable)
 		end
 		
 		
@@ -1083,9 +1074,9 @@ local function main()
 			end
 		end
 
-		list[#list+1] = {Name = "Select blocked remotes", Category = "Explorer", Disabled = next(remote_blocklist) == nil and "No remote is blocked", Run = function()
+		list[#list+1] = {Name = "Select blocked remotes", Category = "Explorer", Disabled = next(RemoteSpy.Blocked) == nil and "No remote is blocked", Run = function()
 			local found = {}
-			for obj in pairs(remote_blocklist) do
+			for obj in pairs(RemoteSpy.Blocked) do
 				local node = nodes[obj]
 				if node then
 					Explorer.MakeNodeVisible(node)
@@ -1454,91 +1445,13 @@ local function main()
 			if node then ScriptViewer.ViewConnections(node.Obj) end
 		end})
 
-		local ClassFire = {
-			RemoteEvent = "FireServer",
-			RemoteFunction = "InvokeServer",
-			UnreliableRemoteEvent = "FireServer",
-
-			BindableEvent = "Fire",
-			BindableFunction = "Invoke",
-		}
-		-- Find Caller counts every call but prints at most once a second per (remote, script), with a
-		-- running count. ponytail: not a full call log (that's a remote spy), add if wanted.
-		local function noteCaller(byCaller, caller, now)
-			local key = caller or false
-			local rec = byCaller[key]
-			if not rec then
-				rec = {n = 0, t = -math.huge}
-				byCaller[key] = rec
-			end
-			rec.n = rec.n + 1
-			local show = now - rec.t >= 1
-			if show then rec.t = now end
-			return rec.n, show
-		end
-
-		local drainCon
-		local function drainCalls() -- Heartbeat: formatting stays out of the hook
-			local calls = remoteHook.Pending
-			if #calls == 0 then return end
-			remoteHook.Pending = {}
-			local now = os.clock()
-			for _, call in ipairs(calls) do
-				local remote,method,caller,args = call[1],call[2],call[3],call[4]
-				local n,show = noteCaller(remote_callers[remote], caller, now)
-				if show then
-					local types = {}
-					for i = 1,math.min(args.n, 5) do types[i] = typeof(args[i]) end
-					print(("[FindCaller] %s:%s <- %s x%d (%s%s)"):format(remote:GetFullName(), method,
-						caller and caller:GetFullName() or "<executor/unknown>", n, table.concat(types, ", "), args.n > 5 and ", ..." or ""))
-				end
-			end
-		end
-
-		-- Starts this Explorer's drain, and installs the hook if no Explorer of this session has yet
-		local function installRemoteHook()
-			drainCon = drainCon or Main.Track(service.RunService.Heartbeat:Connect(drainCalls))
-			if remoteHook.Installed then return end
-			remoteHook.Installed = true
-			local getCaller = env.getcallingscript
-			local old; old = env.hookmetamethod((oldgame or game), "__namecall", function(self, ...)
-				-- Tables first, so getnamecallmethod() only runs for remotes we care about. No Instance
-				-- methods in here (they re-enter __namecall) and no yielding: the call is queued, drainCalls prints it.
-				local block,watch = remote_blocklist[self],remote_watch[self]
-				if block or watch then
-					local m = getnamecallmethod()
-					local pending = remoteHook.Pending
-					if watch == m and #pending < 1000 then -- capped: if OpenDex never comes back from Apply Now, nothing drains the queue
-						local ok,caller = pcall(getCaller)
-						pending[#pending+1] = {self, m, ok and typeof(caller) == "Instance" and caller or nil, table.pack(...)}
-					end
-					if block == m then return nil end
-				end
-				return old(self,...)
-			end)
-		end
-		if remoteHook.Installed then installRemoteHook() end -- after Apply Now the hook is still in place: drain what it records
+		-- Remotes: blocking and the list of calls are the Remote Spy's (a blocked remote's name is red in the tree)
 		context:Register("BLOCK_REMOTE",{Name = "Block From Firing", IconMap = Explorer.MiscIcons, Icon = "Delete", DisabledIcon = "Empty", OnClick = function()
-			installRemoteHook()
-			local sList = selection.List
-			for i, list in sList do
-				local obj = list.Obj
-				if not remote_blocklist[obj] then
-					remote_blocklist[obj] = ClassFire[obj.ClassName]
-				end
-			end
-			Explorer.Refresh() -- its name turns red
+			for _, node in ipairs(selection.List) do RemoteSpy.SetBlocked(node.Obj, true) end
 		end})
 
 		context:Register("UNBLOCK_REMOTE",{Name = "Unblock", IconMap = Explorer.MiscIcons, Icon = "Play", DisabledIcon = "Empty", OnClick = function()
-			local sList = selection.List
-			for i, list in sList do
-				local obj = list.Obj
-				if remote_blocklist[obj] then
-					remote_blocklist[obj] = nil
-				end
-			end
-			Explorer.Refresh()
+			for _, node in ipairs(selection.List) do RemoteSpy.SetBlocked(node.Obj, false) end
 		end})
 
 		context:Register("WHERE_USED",{Name = "Where Is This Used?", IconMap = Explorer.MiscIcons, Icon = "CallRemote", DisabledIcon = "Empty", OnClick = function()
@@ -1546,44 +1459,9 @@ local function main()
 			if node then ScriptViewer.WhereUsed(node.Obj) end
 		end})
 
-		context:Register("FIND_CALLER",{Name = "Find Caller", IconMap = Explorer.MiscIcons, Icon = "CallRemote", DisabledIcon = "Empty", OnClick = function()
-			installRemoteHook()
-			for _, node in ipairs(selection.List) do
-				local obj = node.Obj
-				local method = ClassFire[obj.ClassName]
-				if method then
-					remote_watch[obj] = method
-					remote_callers[obj] = remote_callers[obj] or {}
-				end
-			end
-			Explorer.Refresh() -- its name turns blue
-		end})
-
-		context:Register("STOP_FIND_CALLER",{Name = "Stop Finding Caller", IconMap = Explorer.MiscIcons, Icon = "Pause", DisabledIcon = "Empty", OnClick = function()
-			for _, node in ipairs(selection.List) do
-				remote_watch[node.Obj] = nil
-			end
-			Explorer.Refresh()
-		end})
-
-		context:Register("SELECT_CALLERS",{Name = "Select Callers", IconMap = Explorer.MiscIcons, Icon = "SelectChildren", DisabledIcon = "Empty", OnClick = function()
-			local newSelection,seen = {},{}
-			for _, node in ipairs(selection.List) do
-				for scr in pairs(remote_callers[node.Obj] or {}) do
-					local callerNode = scr and nodes[scr]
-					if callerNode and not seen[callerNode] then
-						seen[callerNode] = true
-						Explorer.MakeNodeVisible(callerNode)
-						newSelection[#newSelection+1] = callerNode
-					end
-				end
-			end
-
-			if #newSelection == 0 then
-				print("[FindCaller] no calling scripts recorded for the selection yet")
-				return
-			end
-			selectNodes(newSelection)
+		context:Register("SPY_REMOTE",{Name = "View in Remote Spy", IconMap = Explorer.MiscIcons, Icon = "CallRemote", DisabledIcon = "Empty", OnClick = function()
+			local node = selection.List[1]
+			if node then RemoteSpy.View(node.Obj) end
 		end})
 
 		context:Register("COPY_API_PAGE",{Name = "Copy Roblox API Page URL", IconMap = Explorer.MiscIcons, Icon = "Reference", OnClick = function()
