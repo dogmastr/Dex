@@ -146,7 +146,7 @@ Main = (function()
 
 	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","RemoteSpy","SaveInstance","ModelViewer","SettingsWindow","CommandPalette","Agent"}
 	Main.Elevated = false
-	Main.Version = "4.1"
+	Main.Version = "4.2"
 	Main.DefaultSettings = DefaultSettings -- what Reset buttons in the settings go back to
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}

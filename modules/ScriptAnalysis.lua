@@ -1537,13 +1537,14 @@ local function main()
 		return site or nil
 	end
 
-	-- Where a local probably is in the upvalue list of function f. Luau numbers upvalues in the order the
-	-- code first uses them and keeps no names, so this counts the outside locals f's source mentions, in
-	-- source order. An estimate: the compiler drops locals that are plain constants and evaluates the right
-	-- side of an assignment before the left.
-	function A.UpvalueIndex(R, f, sym)
+	-- The locals from outside that function f uses, as its upvalue list probably has them: the list, and
+	-- where each one is in it. Luau numbers upvalues in the order the code first uses them and keeps no
+	-- names, so this lists the outside locals f's source mentions, in source order. An estimate: the
+	-- compiler drops locals that are plain constants and evaluates the right side of an assignment before
+	-- the left.
+	function A.Upvalues(R, f)
 		local from = scopeStart(f)
-		local seen, count = {}, 0
+		local list, seen = {}, {}
 		for ti = from, f.e do
 			local s = R.symAt[ti]
 			if s and not seen[s] then
@@ -1551,11 +1552,17 @@ local function main()
 				local outside
 				if s.decl then outside = s.decl < from or s.decl > f.e else outside = s.s < f.s or s.s > f.e end
 				if outside then
-					count += 1
-					seen[s] = count
+					list[#list + 1] = s
+					seen[s] = #list
 				end
 			end
 		end
+		return list, seen
+	end
+
+	-- Where a local probably is in the upvalue list of function f (see Upvalues).
+	function A.UpvalueIndex(R, f, sym)
+		local _, seen = A.Upvalues(R, f)
 		return seen[sym]
 	end
 

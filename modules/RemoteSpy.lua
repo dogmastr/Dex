@@ -1469,6 +1469,29 @@ end)]]
 					rule = rule and {when = rule.WhenText, args = rule.ArgsText} or nil, newest = calls}
 			end)
 
+			-- every remote there is, used or not: the game's objects, and those parented to nothing
+			reg("remotes", function(args)
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 100), 1, 500)
+				local query = type(args.query) == "string" and args.query ~= "" and args.query:lower() or nil
+				local out, total = {}, 0
+				local function add(inst, orphan)
+					local class = inst.ClassName
+					if not FIRE[class] or (BINDABLE[class] and args.bindables ~= true) or isInternal(inst) then return end
+					local ok, path = pcall(getFullName, inst)
+					path = ok and path or inst.Name
+					if query and not path:lower():find(query, 1, true) then return end
+					total = total + 1
+					if #out >= limit then return end
+					local sent, received = logOf.Out[inst], logOf.In[inst]
+					out[#out+1] = {remote = path, class = class, sent = sent and sent.Count or 0, received = received and received.Count or 0,
+						blocked = spy.Block[inst] and true or nil, notInGame = orphan}
+				end
+				for _, inst in ipairs(game:GetDescendants()) do pcall(add, inst) end
+				local ok, orphans = pcall(env.getnilinstances or error)
+				for _, inst in ipairs(ok and type(orphans) == "table" and orphans or {}) do pcall(add, inst, true) end
+				return {spyRunning = spy.On and true or false, total = total, shown = #out, remotes = out}
+			end)
+
 			reg("suggest_rule", function(args)
 				if RemoteSpy.Unavailable then error(RemoteSpy.Unavailable, 0) end
 				if not env.loadstring then error("Your executor has no loadstring, which rules need", 0) end

@@ -1139,10 +1139,13 @@ local function main()
 
 		-- The running functions that correspond to a function of the source: the same name and number of
 		-- parameters, the one with the most constants in common first. certain is true when one stands out.
-		-- An anonymous function has no name to go on, so its constants are all that tells it apart.
-		local function liveMatches(R, F, keep)
-			local scr = currentScript()
-			if not scr or not env.getgc then return {}, false end
+		-- An anonymous function has no name to go on, so its constants are all that tells it apart. The
+		-- third value is how many fit best (the first ones of the list, with as many constants in common):
+		-- the copies of the function that are running, when the constants tell it apart. scr is the script
+		-- whose running functions are looked at (the one in front when it is not given).
+		local function liveMatches(R, F, keep, scr)
+			scr = scr or currentScript()
+			if not scr or not env.getgc then return {}, false, 0 end
 
 			local short, params = Analysis.ShortName(F), Analysis.ParamCount(F)
 			local wanted = Analysis.Literals(R, F)
@@ -1164,24 +1167,33 @@ local function main()
 			end
 			table.sort(list, function(a, b) return a.Score > b.Score end)
 
-			local entries = {}
-			for i,m in ipairs(list) do entries[i] = m.Entry end
-			return entries, #list == 1 or (#list > 1 and list[1].Score > list[2].Score)
+			local entries, top = {}, 0
+			for i,m in ipairs(list) do
+				entries[i] = m.Entry
+				if m.Score == list[1].Score then top = i end
+			end
+			return entries, #list == 1 or (#list > 1 and list[1].Score > list[2].Score), top
 		end
 
-		-- Starts or stops tracing every running function that fits a function of the source.
-		local function traceFunction(R, F, stop)
-			local entries = liveMatches(R, F)
+		-- Starts tracing the running functions that fit a function of the source best, or stops tracing
+		-- every one that fits it (a constant changed since may have moved the best fit). scr: see
+		-- liveMatches. Returns how many it traces, or stopped.
+		local function traceFunction(R, F, stop, scr)
+			local entries, _, top = liveMatches(R, F, false, scr)
 			local name = Analysis.ShortName(F) or Analysis.FunctionName(R, F)
 			if #entries == 0 then
 				toast(("No running function matches %s (it may not exist yet)"):format(name), "warn")
-				return
+				return 0
 			end
-			for _,entry in ipairs(entries) do
-				if stop then stopTrace(entry.Func) else startTrace(entry, true) end
+			local count = 0
+			for i = 1, stop and #entries or top do
+				local func = entries[i].Func
+				if stop then stopTrace(func) else startTrace(entries[i], true) end
+				if stop or (traces[func] and traces[func].Active) then count = count + 1 end
 			end
-			toast(("%s %s%s"):format(stop and "Stopped tracing" or "Tracing", name, #entries > 1 and (" ("..#entries.." functions)") or ""))
+			toast(("%s %s%s"):format(stop and "Stopped tracing" or "Tracing", name, count > 1 and (" ("..count.." functions)") or ""))
 			if not stop then openPage("trace") end
+			return count
 		end
 
 		----------------------------------------------------------------------------------------------
@@ -1699,13 +1711,8 @@ local function main()
 		end
 
 		-- The value a module in the game returned, if something has required it already (requiring it now
-		-- would run its code): a table of fields, each a value that can be changed or a function to open.
-		rootPages.module = {Title = "What the module returned", Chip = "Module", Tip = "The value the open ModuleScript returned to the scripts that required it: its fields can be changed, its functions opened", Build = function()
-			local scr = currentScript()
-			if not (scr and scr:IsA("ModuleScript")) then
-				addTextRow(1, "Open a ModuleScript to see the value it returned.")
-				return
-			end
+		-- would run its code): true and the value, or false and why there is none to read.
+		Live.moduleValue = function(scr)
 			local loaded = false
 			if env.getloadedmodules then
 				local okList, list = pcall(env.getloadedmodules)
@@ -1714,14 +1721,27 @@ local function main()
 				end
 			end
 			if not loaded then
-				addTextRow(1, env.getloadedmodules and "Nothing has required this module yet, and requiring it now would run its code." or "Your executor has no getloadedmodules.")
-				return
+				return false, env.getloadedmodules and "Nothing has required this module yet, and requiring it now would run its code." or "Your executor has no getloadedmodules."
 			end
 			local ok, value = pcall(require, scr)
-			editTitle.Text = "Returned by "..scr.Name
+			if not ok then return false, "Could not read it: "..tostring(value) end
+			return true, value
+		end
+
+		-- What the open module returned: a table of fields, each a value that can be changed or a function to open.
+		rootPages.module = {Title = "What the module returned", Chip = "Module", Tip = "The value the open ModuleScript returned to the scripts that required it: its fields can be changed, its functions opened", Build = function()
+			local scr = currentScript()
+			if not (scr and scr:IsA("ModuleScript")) then
+				addTextRow(1, "Open a ModuleScript to see the value it returned.")
+				return
+			end
+			local ok, value = Live.moduleValue(scr)
 			if not ok then
-				addTextRow(1, "Could not read it: "..tostring(value))
-			elseif type(value) ~= "table" then
+				addTextRow(1, value)
+				return
+			end
+			editTitle.Text = "Returned by "..scr.Name
+			if type(value) ~= "table" then
 				addTextRow(1, ("It returns a %s: %s"):format(typeof(value), fmt(value)))
 			else
 				Live.tableRows(value, scr.Name)
@@ -1880,22 +1900,28 @@ local function main()
 
 		Live.coverageOn = function() return coverage.On end
 
-		Live.toggleCoverage = function()
+		-- The script whose calls are being counted, or nil
+		Live.coverageScript = function() return coverage.On and coverage.Script or nil end
+
+		-- Starts counting the calls of a script's running functions (the script in front, the first 40 of
+		-- them, unless told otherwise), or stops the counting that is going on. Returns how many it counts.
+		Live.toggleCoverage = function(scr, limit)
 			if coverage.On then
 				for func,rec in pairs(coverage.Hooks) do unhook(func, rec.Old) end
-				coverage.Hooks, coverage.On = {}, false
+				coverage.Hooks, coverage.On, coverage.Script = {}, false, nil
 				toast("No longer counting calls")
-				return
+				return 0
 			end
-			local scr = currentScript()
+			scr = scr or currentScript()
+			limit = limit or COVERAGE_LIMIT
 			if not (scr and env.getgc and env.hookfunction) then
 				toast("Open a decompiled script on an executor with getgc and hookfunction first", "warn")
-				return
+				return 0
 			end
 			local list = liveFunctions(scr, true)
 			local count = 0
 			for _,entry in ipairs(list) do
-				if count >= COVERAGE_LIMIT then break end
+				if count >= limit then break end
 				local traced = traces[entry.Func]
 				if not coverage.Hooks[entry.Func] and not (traced and traced.Active) then
 					local rec = {Hits = 0}
@@ -1913,33 +1939,44 @@ local function main()
 					end
 				end
 			end
-			coverage.On = count > 0
-			toast(count == 0 and "No running function could be hooked" or ("Counting the calls of %d running functions%s"):format(count, #list > COVERAGE_LIMIT and (" of "..#list.." (the first ones)") or ""), count == 0 and "warn" or "info")
+			coverage.On, coverage.Script = count > 0, count > 0 and scr or nil
+			toast(count == 0 and "No running function could be hooked" or ("Counting the calls of %d running functions%s"):format(count, #list > limit and (" of "..#list.." (the first ones)") or ""), count == 0 and "warn" or "info")
+			return count
 		end
 
 		-- How many calls the running copies of a function of the source have had since counting started, or
-		-- nil when it is not being counted (or no running function matches it).
-		Live.coverageHits = function(R, F)
+		-- nil when it is not being counted (or no running function matches it). The copies are the running
+		-- functions that fit it best. The second value is true when those are not all one function (they
+		-- were made on different lines, and neither name nor constants tell them apart): the count is then
+		-- theirs together. scr: see liveMatches.
+		Live.coverageHits = function(R, F, scr)
 			if not coverage.On then return nil end
 			local map = coverage.Map[R]
 			if not map then
 				map = {}
 				coverage.Map[R] = map
 			end
-			local entries = map[F]
-			if not entries then
-				entries = liveMatches(R, F, true)
-				map[F] = entries
+			local found = map[F]
+			if not found then
+				local entries, _, top = liveMatches(R, F, true, scr)
+				local madeAt
+				found = {Entries = entries, Top = top, Mixed = false}
+				for i = 1, top do
+					local ok, line = pcall(debug.info, entries[i].Func, "l")
+					if ok and madeAt and line ~= madeAt then found.Mixed = true end
+					madeAt = ok and line or madeAt
+				end
+				map[F] = found
 			end
 			local sum, any = 0, false
-			for _,entry in ipairs(entries) do
-				local rec = coverage.Hooks[entry.Func]
+			for i = 1, found.Top do
+				local rec = coverage.Hooks[found.Entries[i].Func]
 				if rec then
 					sum = sum + rec.Hits
 					any = true
 				end
 			end
-			return any and sum or nil
+			return any and sum or nil, found.Mixed
 		end
 
 		-- "name  source:line" for a connection's handler. [exec] marks executor-made closures (OpenDex's own listeners).
@@ -2051,6 +2088,191 @@ local function main()
 				if rec.Active and rec.Label == name then return true end
 			end
 			return false
+		end
+
+		----------------------------------------------------------------------------------------------
+		-- The AI window: the running script, for an agent (Tools.registerAgent calls this, with h: what
+		-- finds the script, the decompile, the analysis and the function its arguments name). A function
+		-- of the source is matched to the running ones as the right-click menu matches it, and the hooks
+		-- are the viewer's own: they show in the Outline and on the Trace page, and come off when OpenDex
+		-- closes.
+		----------------------------------------------------------------------------------------------
+
+		Live.agent = function(Agent, h)
+			local reg = Agent.Register
+
+			local function need(...)
+				for _,name in ipairs({...}) do
+					if not env[name] then error("Your executor has no "..name, 0) end
+				end
+			end
+
+			-- A value on one line. A table is its fields, one level deep: written out in full it could be
+			-- huge, and reading it that far would call into the game's own metamethods.
+			local function brief(value, max)
+				if type(value) ~= "table" then return Agent.Show(value, max or 200) end
+				local parts, more = {}, 0
+				for k,v in next, value do
+					if #parts < 12 then
+						parts[#parts+1] = ("%s = %s"):format(tostring(k), type(v) == "table" and "{...}" or Agent.Show(v, 60))
+					else
+						more = more + 1
+					end
+				end
+				return "{"..table.concat(parts, ", ")..(more > 0 and (", and "..more.." more") or "").."}"
+			end
+
+			-- The function the arguments name, which has to be one that can be running (not the main chunk)
+			local function namedFunction(R, args)
+				local F = h.functionFor(R, args)
+				if not F.parent then error("that line is in the main chunk, not in a function: give a line inside a function, or its name", 0) end
+				return F
+			end
+
+			reg("coverage", function(args)
+				need("getgc", "hookfunction")
+				local action = args.action or "read"
+				local counted = Live.coverageScript()
+				if action == "stop" then
+					if counted then Live.toggleCoverage() end
+					return {counting = false, stopped = counted and h.whereIs(counted) or nil}
+				end
+				local scr = h.scriptFor(args.script)
+				if action == "start" then
+					if counted then error(("calls are being counted already, in %s: read them, or stop that first"):format(h.whereIs(counted)), 0) end
+					local count = Live.toggleCoverage(scr, 200)
+					if count == 0 then error("no running function of this script could be hooked (the script may not be running)", 0) end
+					return {counting = true, script = Agent.IdOf(scr), functions = count, note = "Have the thing done in the game now, then read the counts (action = \"read\")."}
+				elseif action ~= "read" then
+					error("action is start, read or stop", 0)
+				end
+				if counted ~= scr then
+					error(counted and ("calls are being counted in %s, not in this script"):format(h.whereIs(counted)) or "calls are not being counted: start it first (action = \"start\")", 0)
+				end
+
+				local R = h.analysisOf(h.rawOf(scr))
+				local ran, idle, unmatched = {}, 0, 0
+				for _,o in ipairs(Analysis.Outline(R)) do
+					if o.fn.parent then
+						local hits, mixed = Live.coverageHits(R, o.fn, scr)
+						if not hits then
+							unmatched = unmatched + 1
+						elseif hits == 0 then
+							idle = idle + 1
+						else
+							ran[#ran+1] = {name = o.name, line = o.line1, last = o.line2, calls = hits, shared = mixed or nil}
+						end
+					end
+				end
+				table.sort(ran, function(a, b)
+					if a.calls ~= b.calls then return a.calls > b.calls end
+					return a.line < b.line
+				end)
+				local total = #ran
+				for i = #ran, 101, -1 do ran[i] = nil end
+				return {script = Agent.IdOf(scr), path = Tools.fullName(scr), ranCount = total, ran = ran, notCalled = idle, notCounted = unmatched}
+			end)
+
+			reg("trace", function(args)
+				local action = args.action or "read"
+				if action == "start" or (action == "stop" and args.script ~= nil) then
+					need("getgc", "hookfunction")
+					local scr = h.scriptFor(args.script)
+					local R = h.analysisOf(h.rawOf(scr))
+					local F = namedFunction(R, args)
+					local name = Analysis.FunctionName(R, F)
+					local count = traceFunction(R, F, action == "stop", scr)
+					if count == 0 then error(("no running function matches %s (the script may not be running, or the function is not made yet)"):format(name), 0) end
+					return {[action == "stop" and "stopped" or "tracing"] = name, script = Agent.IdOf(scr), runningFunctions = count}
+				elseif action == "stop" then
+					local count = 0
+					for func,rec in pairs(traces) do
+						if rec.Active then count = count + 1 end
+						stopTrace(func)
+					end
+					traces = {}
+					return {stopped = count}
+				elseif action ~= "read" then
+					error("action is start, read or stop", 0)
+				end
+
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 30), 1, 100)
+				local out = {tracing = {}, calls = {}, logged = #traceLog}
+				for _,rec in pairs(traces) do
+					local last
+					if rec.Last then
+						last = {}
+						for i = 1, math.min(rec.Last.n, 10) do last[i] = brief(rec.Last[i], 300) end
+						last = table.concat(last, ", ")
+					end
+					out.tracing[#out.tracing+1] = {["function"] = rec.Label, calls = rec.Hits, stopped = not rec.Active or nil, lastArguments = last}
+				end
+				table.sort(out.tracing, function(a, b) return a["function"] < b["function"] end)
+				for i = math.max(1, #traceLog - limit + 1), #traceLog do
+					local e = traceLog[i]
+					out.calls[#out.calls+1] = {at = math.floor(e.Time * 10) / 10, ["function"] = e.Label, arguments = e.Args, returned = e.Rets, caller = e.Caller}
+				end
+				return out
+			end)
+
+			reg("live", function(args)
+				local scr = h.scriptFor(args.script)
+				if args.line == nil and (type(args.name) ~= "string" or args.name == "") then
+					if not scr:IsA("ModuleScript") then error("give a line or a name, for a function's running values (a ModuleScript by itself gives what it returned)", 0) end
+					local ok, value = Live.moduleValue(scr)
+					if not ok then error(value, 0) end
+					if type(value) ~= "table" then return ("%s returned a %s: %s"):format(h.whereIs(scr), typeof(value), brief(value)) end
+					local fields = {}
+					for k,v in next, value do fields[#fields+1] = ("  %s = %s"):format(tostring(k), brief(v)) end
+					table.sort(fields)
+					local total = #fields
+					for i = #fields, 101, -1 do fields[i] = nil end
+					return ("%s returned a table with %d fields%s\n%s"):format(h.whereIs(scr), total, total > 100 and " (the first 100)" or "", table.concat(fields, "\n"))
+				end
+
+				need("getgc", "getupvalues", "getconstants")
+				local R = h.analysisOf(h.rawOf(scr))
+				local F = namedFunction(R, args)
+				local entries, _, top = liveMatches(R, F, false, scr)
+				if #entries == 0 then
+					error(("no running function matches %s (the script may not be running, or the function is not made yet)"):format(Analysis.FunctionName(R, F)), 0)
+				end
+				local func = entries[1].Func
+				local lines = {h.whereIs(scr), ("%s   (lines %d-%d)"):format(Analysis.Signature(R, F), F.line1, F.line2)}
+				if top > 1 then lines[#lines+1] = ("%d running functions fit it: the first is shown"):format(top) end
+
+				-- (a list with holes: a value that is nil has no entry)
+				local function numbered(list)
+					local last = 0
+					for k in pairs(list) do
+						if type(k) == "number" and k > last then last = k end
+					end
+					return last
+				end
+				local okUps, ups = pcall(env.getupvalues, func)
+				ups = okUps and type(ups) == "table" and ups or {}
+				local names = Analysis.Upvalues(R, F)
+				local count = numbered(ups)
+				lines[#lines+1] = ""
+				if count == 0 then
+					lines[#lines+1] = "Upvalues: none"
+				else
+					lines[#lines+1] = ("Upvalues (%d; the names are a guess from the order the code uses them%s):"):format(count, #names ~= count and (", and a weak one here: the source uses "..#names.." outside locals") or "")
+					for i = 1, math.min(count, 60) do
+						lines[#lines+1] = ("  [%d] %s = %s"):format(i, names[i] and names[i].name or "?", brief(ups[i]))
+					end
+				end
+				local okConsts, consts = pcall(env.getconstants, func)
+				consts = okConsts and type(consts) == "table" and consts or {}
+				local shown = {}
+				for i = 1, numbered(consts) do
+					if consts[i] ~= nil and #shown < 60 then shown[#shown+1] = ("  [%d] %s"):format(i, brief(consts[i], 100)) end
+				end
+				lines[#lines+1] = ""
+				lines[#lines+1] = #shown == 0 and "Constants: none" or "Constants:"
+				for _,text in ipairs(shown) do lines[#lines+1] = text end
+				return table.concat(lines, "\n")
+			end)
 		end
 	end
 
@@ -4073,18 +4295,19 @@ local function main()
 		-- Searching what has been read
 		----------------------------------------------------------------------------------------------
 
-		-- The matches of the query in an entry. The token modes parse the scripts that have the text in them.
-		local function searchEntry(entry)
-			if not K.TOKEN_MODES[mode] then
-				return Analysis.SearchText(entry.Text, query, mode, matchCase, K.PER_SCRIPT)
+		-- The matches of a text in an entry, searched for in one of K.MODES. The token modes parse the scripts
+		-- that have the text in them.
+		local function searchEntry(entry, text, how, case)
+			if not K.TOKEN_MODES[how] then
+				return Analysis.SearchText(entry.Text, text, how, case, K.PER_SCRIPT)
 			end
-			local head = query:match("^%s*([^%(]-)%s*%(") or query
-			local needle = mode == "call" and head:match("([%w_]+)%s*$") or query
+			local head = text:match("^%s*([^%(]-)%s*%(") or text
+			local needle = how == "call" and head:match("([%w_]+)%s*$") or text
 			if not needle then return {} end
-			if not (matchCase and entry.Text or entry.Text:lower()):find(matchCase and needle or needle:lower(), 1, true) then return {} end
+			if not (case and entry.Text or entry.Text:lower()):find(case and needle or needle:lower(), 1, true) then return {} end
 			local ok, R = pcall(Analysis.Analyze, entry.Text)
 			if not ok then return {} end
-			return Analysis.SearchTokens(R, query, mode, matchCase, K.PER_SCRIPT)
+			return Analysis.SearchTokens(R, text, how, case, K.PER_SCRIPT)
 		end
 
 		-- Lists the matches of the query in a script; a script whose code was listed already (a copy) only counts.
@@ -4099,7 +4322,7 @@ local function main()
 				return
 			end
 			if matchTotal >= K.MAX_MATCHES_ALL then return end
-			local found = searchEntry(entry)
+			local found = searchEntry(entry, query, mode, matchCase)
 			if found and #found > 0 then
 				matchTotal = matchTotal + #found
 				resultOf[key] = {Script = scr, Path = fullName(scr), Matches = found, Copies = 1, Seen = {[scr] = true}}
@@ -5322,6 +5545,273 @@ local function main()
 				redraw()
 			end
 		end}
+
+		----------------------------------------------------------------------------------------------
+		-- The AI window: what the scripts say together, for an agent (Tools.registerAgent calls this, with
+		-- h: what finds the script an argument names, its decompile and its analysis). A tool that needs
+		-- every script read starts that, as the pages here do, waits a while for it, and says so when it
+		-- answers from a part of the scripts.
+		----------------------------------------------------------------------------------------------
+
+		Tools.agentScan = function(Agent, h)
+			local reg = Agent.Register
+			local WAIT = 45 -- seconds a tool waits for the reading before it answers from what there is
+
+			-- Has the scripts read (and parsed, when the digests are needed). nil when that is done, else
+			-- what to tell the agent about its answer.
+			local function ready(parsed)
+				if parsed then
+					Tools.index()
+				elseif not state.Scanned and not state.Running then
+					Tools.scan()
+				end
+				local started = os.clock()
+				while (state.Running or (parsed and state.Indexing)) and not state.Dead and os.clock() - started < WAIT do task.wait(0.25) end
+				if state.Scanned and not state.Running and not (parsed and (state.Indexing or unparsed() > 0)) then return nil end
+				return (workNote() or "The scripts have not all been read")..". This answer is from the ones read so far: ask again for the rest."
+			end
+
+			-- What a digest counts, by the name an agent filters and sorts with
+			local FACETS = {
+				lines = function(d) return d.lines end,
+				functions = function(d) return d.sig.functions end,
+				remotes = function(d) return d.sig.fire + d.sig.listen end,
+				http = function(d) return d.sig.http end,
+				loadstring = function(d) return d.sig.loadstring end,
+				suspicious = function(d) return d.sig.words end,
+				obfuscated = function(d) return d.sig.obf >= 2 and d.sig.obf * 100000 + d.sig.longest or 0 end,
+			}
+
+			reg("scripts", function(args)
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 50), 1, 200)
+				local query = type(args.query) == "string" and args.query ~= "" and args.query:lower() or nil
+				local has, sort = args.has, args.sort
+				if has ~= nil and not (FACETS[has] or has == "changed" or has == "notes") then error("has is one of: remotes, http, loadstring, suspicious, obfuscated, changed, notes", 0) end
+				if sort ~= nil and not FACETS[sort] then error("sort is one of: lines, functions, remotes, http, loadstring, suspicious, obfuscated", 0) end
+				local note
+				if has == "changed" then
+					note = ready(false)
+				elseif sort or (has and has ~= "notes") then
+					note = ready(true)
+				end
+
+				local changed, noted = {}, {}
+				for _,key in ipairs(state.Changes and state.Changes.changed or {}) do
+					local scr = state.KeyScript[key]
+					if scr then changed[scr] = true end
+				end
+				for _,a in ipairs(Tools.annotated()) do noted[a.Script] = a.Text end
+
+				local rows = {}
+				for _,scr in ipairs(Tools.scriptList()) do
+					local path = fullName(scr)
+					if not query or path:lower():find(query, 1, true) then
+						local entry = memory[scr]
+						local d = entry and entry.D or nil -- (nothing before it is parsed, and when it does not parse)
+						local keep = true
+						if has == "changed" then
+							keep = changed[scr] == true
+						elseif has == "notes" then
+							keep = noted[scr] ~= nil
+						elseif has then
+							keep = d ~= nil and FACETS[has](d) > 0
+						end
+						if keep then rows[#rows+1] = {Script = scr, Path = path, D = d, Score = sort and d and FACETS[sort](d) or 0} end
+					end
+				end
+				if sort then
+					table.sort(rows, function(a, b)
+						if a.Score ~= b.Score then return a.Score > b.Score end
+						return a.Path < b.Path
+					end)
+				end
+
+				local function some(n) return n > 0 and n or nil end
+				local out = {}
+				for i = 1, math.min(#rows, limit) do
+					local r = rows[i]
+					local item = {id = Agent.IdOf(r.Script), path = r.Path, class = r.Script.ClassName, changed = changed[r.Script], notes = noted[r.Script]}
+					if r.D then
+						local s = r.D.sig
+						item.lines, item.functions = r.D.lines, s.functions
+						item.fire, item.listen, item.http, item.loadstring, item.suspicious = some(s.fire), some(s.listen), some(s.http), some(s.loadstring), some(s.words)
+						item.obfuscated = s.obf >= 2 or nil
+					end
+					out[i] = item
+				end
+				return {total = #rows, shown = #out, scripts = out, note = note}
+			end)
+
+			reg("search", function(args)
+				local text = args.query
+				if type(text) ~= "string" or text == "" then error("query is needed: what to look for", 0) end
+				local how = args.mode or "text"
+				if not table.find(K.MODES, how) then error("mode is one of: "..table.concat(K.MODES, ", "), 0) end
+				local case = args.case == true
+				if how == "pattern" then
+					local ok, why = Analysis.SearchText("", text, how, case, 1)
+					if not ok then error(why, 0) end
+				elseif how == "call" and not (text:match("([%w_]+)%s*%(") or text:match("([%w_]+)%s*$")) then
+					error("Write the name of a function, or name(text in its arguments)", 0)
+				end
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 50), 1, 200)
+				local within = type(args.path) == "string" and args.path ~= "" and args.path:lower() or nil
+				local note = ready(false)
+
+				-- (the user's own search, on the Search page, is not touched: this goes through the scripts itself)
+				local lines, matches, hit, searched = {}, 0, 0, 0
+				local frameStart = os.clock()
+				for _,e in ipairs(Tools.entries()) do
+					if not within or e.Path:lower():find(within, 1, true) then
+						searched = searched + 1
+						local ok, found = pcall(searchEntry, e.Entry, text, how, case)
+						if ok and found and #found > 0 then
+							hit = hit + 1
+							if matches < limit then lines[#lines+1] = ("%s (%s)%s"):format(e.Path, Agent.IdOf(e.Script), e.Copies > 1 and (", and "..(e.Copies - 1).." copies") or "") end
+							for _,m in ipairs(found) do
+								matches = matches + 1
+								if matches <= limit then lines[#lines+1] = ("  %d: %s"):format(m.line, m.text) end
+							end
+						end
+						if os.clock() - frameStart > K.BUDGET then
+							task.wait()
+							frameStart = os.clock()
+						end
+					end
+				end
+				local head = ("%d match%s in %d of %d scripts%s"):format(matches, matches == 1 and "" or "es", hit, searched, matches > limit and (", the first "..limit.." shown") or "")
+				if note then head = head.."\n"..note end
+				return #lines > 0 and (head.."\n"..table.concat(lines, "\n")) or head
+			end)
+
+			reg("remote_map", function(args)
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 100), 1, 500)
+				local want = type(args.remote) == "string" and args.remote ~= "" and args.remote:lower() or nil
+				local note = ready(true)
+				local sites = Tools.remoteSites()
+				local lines = {}
+
+				if args.unused == true then
+					if note then error(("which remotes no script mentions is known once every script is read (%s): ask again"):format(workNote() or "they are not"), 0) end
+					local unused = Tools.unusedRemotes(sites)
+					lines[1] = ("%d remotes of the game are mentioned by none of its scripts (the server may use them, or nothing does)"):format(#unused)
+					for i = 1, math.min(#unused, limit) do lines[#lines+1] = ("  %s (%s)"):format(fullName(unused[i]), unused[i].ClassName) end
+					return table.concat(lines, "\n")
+				end
+
+				local matched = {}
+				for _,s in ipairs(sites) do
+					if not want or s.Text:lower():find(want, 1, true) then matched[#matched+1] = s end
+				end
+				if note then lines[1] = note end
+				if not want then
+					lines[#lines+1] = ("%d remotes are fired or listened to by the scripts"):format(#matched)
+					for i = 1, math.min(#matched, limit) do
+						local s = matched[i]
+						lines[#lines+1] = ("  %s%s   fire %d, listen %d"):format(s.Text, s.Inst and "" or " (not followed to an object)", #s.Fire, #s.Listen)
+					end
+					return table.concat(lines, "\n")
+				end
+				if #matched == 0 then
+					error(("no script fires or listens to a remote with '%s' in its path (remote_map without a remote lists the ones they do)%s"):format(args.remote, note and (". "..note) or ""), 0)
+				end
+				for i = 1, math.min(#matched, 10) do
+					local s = matched[i]
+					lines[#lines+1] = s.Text..(s.Inst and (" ("..s.Inst.ClassName..")") or " (not followed to an object)")
+					for _,group in ipairs({{"fired by", s.Fire}, {"listened to by", s.Listen}}) do
+						lines[#lines+1] = ("  %s (%d):"):format(group[1], #group[2])
+						for j = 1, math.min(#group[2], 30) do
+							local p = group[2][j]
+							lines[#lines+1] = ("    %s (%s) line %d%s: %s(%s)%s"):format(p.Path, Agent.IdOf(p.Script), p.Line, (p.Fn and p.Fn ~= "<main>") and (", in "..p.Fn) or "",
+								tostring(p.Method), table.concat(p.Args or {}, ", "), p.Copies > 1 and (", and "..(p.Copies - 1).." copies") or "")
+						end
+						if #group[2] > 30 then lines[#lines+1] = ("    and %d more"):format(#group[2] - 30) end
+					end
+				end
+				if #matched > 10 then lines[#lines+1] = ("and %d more remotes have that in their path: give more of it"):format(#matched - 10) end
+				return table.concat(lines, "\n")
+			end)
+
+			reg("usage", function(args)
+				local scr = h.scriptFor(args.script)
+				local note = ready(true)
+				local lines = {h.whereIs(scr)}
+				if note then lines[#lines+1] = note end
+
+				if type(args.member) == "string" and args.member ~= "" then
+					if not scr:IsA("ModuleScript") then error("member is for a ModuleScript: the uses of one of its functions or fields in the scripts that require it", 0) end
+					local users = Tools.usersOf(scr, args.member)
+					lines[#lines+1] = ("%s.%s is used in %d place%s of the other scripts%s"):format(scr.Name, args.member, #users, #users == 1 and "" or "s", #users > 100 and " (the first 100)" or "")
+					for i = 1, math.min(#users, 100) do
+						local u = users[i]
+						lines[#lines+1] = ("  %s  %s (%s) line %d: %s"):format(u.Write and "write" or (u.Call and "call" or "read"), fullName(u.Script), Agent.IdOf(u.Script), u.Line, lineOf(u.Entry.Text, u.Line):sub(1, 160))
+					end
+					return table.concat(lines, "\n")
+				end
+
+				local reqs = Analysis.Requires(h.analysisOf(h.rawOf(scr)))
+				lines[#lines+1] = ("Requires (%d):"):format(#reqs)
+				for i = 1, math.min(#reqs, 100) do
+					local req = reqs[i]
+					local inst = req.path.root and resolveInstance(req.path, scr)
+					local what
+					if typeof(inst) == "Instance" and inst:IsA("LuaSourceContainer") then
+						what = ("%s (%s)"):format(fullName(inst), Agent.IdOf(inst))
+					else
+						what = req.path.text..(inst and "  (not a script)" or "  (not found in the game now)")
+					end
+					lines[#lines+1] = ("  line %d: %s"):format(req.line, what)
+				end
+				local by = requiredBy(scr)
+				lines[#lines+1] = ("Required by (%d of the %d scripts read):"):format(#by, countRead())
+				for i = 1, math.min(#by, 100) do
+					lines[#lines+1] = ("  %s (%s) line %d"):format(fullName(by[i].Script), Agent.IdOf(by[i].Script), by[i].Line)
+				end
+				return table.concat(lines, "\n")
+			end)
+
+			reg("changes", function(args)
+				local note = ready(false)
+				local c = state.Changes
+				-- (why there is nothing to compare, as the Changes page says it)
+				local function none()
+					return note or state.ChangesNote or (state.Baseline and "Read the scripts to compare them." or (state.Scanned and "There is no earlier read of this place to compare with. The next session will have this one." or "The scripts are compared with the last session's once they have been read."))
+				end
+
+				if args.script ~= nil then
+					local scr = h.scriptFor(args.script)
+					if not c then error(none(), 0) end
+					local key
+					for _,k in ipairs(c.changed) do
+						if state.KeyScript[k] == scr then key = k break end
+					end
+					if not key then error("that script is not one of the changed ones (changes without a script lists them)", 0) end
+					local entry = memory[scr]
+					if not entry then error("that script was not read (it could not be decompiled)", 0) end
+					local old = D.cachedRead(state.Baseline[key])
+					if not old then error("the old version is no longer on disk", 0) end
+					local text, _, stats = Analysis.DiffText(old, entry.Text, 3, not Tools.ExactDiff)
+					if stats.added == 0 and stats.removed == 0 then
+						return ("%s: the two versions differ only in the names of local variables"):format(h.whereIs(scr))
+					end
+					if #text > 40000 then text = text:sub(1, 40000).."\n... cut here: the difference is longer" end
+					return ("%s, last time vs now: %d lines added, %d removed%s\n%s"):format(h.whereIs(scr), stats.added, stats.removed, Tools.ExactDiff and "" or " (names of local variables ignored)", text)
+				end
+
+				if not c then return {note = none()} end
+				local limit = math.clamp(math.floor(tonumber(args.limit) or 100), 1, 500)
+				local out = {comparedWith = state.BaselineTime and os.date("%Y-%m-%d %H:%M", state.BaselineTime) or nil, note = note,
+					counts = {changed = #c.changed, added = #c.added, removed = #c.removed}, changed = {}, added = {}, removed = {}}
+				for _,kind in ipairs({"changed", "added"}) do
+					for i = 1, math.min(#c[kind], limit) do
+						local scr = state.KeyScript[c[kind][i]]
+						out[kind][i] = {path = c[kind][i], script = scr and Agent.IdOf(scr) or nil}
+					end
+				end
+				for i = 1, math.min(#c.removed, limit) do out.removed[i] = c.removed[i] end
+				return out
+			end)
+		end
 	end
 
 	do
@@ -6837,7 +7327,8 @@ local function main()
 	-- The AI window: what an agent can ask of the viewer (Agent.lua runs the calls, mcp/tools.json says
 	-- what the agent is told). Lines are lines of the raw decompile, as ViewScript and the search
 	-- results use them. Reading never changes what the user sees; apply_names, note and open show the
-	-- script in the viewer, because that is where their result is.
+	-- script in the viewer, because that is where their result is. The tools about every script together
+	-- are with the scan (Tools.agentScan), the ones about the running script with Live (Live.agent).
 	----------------------------------------------------------------------------------------------
 
 	Tools.registerAgent = function(Agent)
@@ -6943,19 +7434,32 @@ local function main()
 			return out
 		end)
 
-		reg("scripts", function(args)
-			local limit = math.clamp(math.floor(tonumber(args.limit) or 50), 1, 200)
-			local query = type(args.query) == "string" and args.query ~= "" and args.query:lower() or nil
-			local out, total = {}, 0
-			for _,scr in ipairs(Tools.scriptList()) do
-				local path = Tools.fullName(scr)
-				if not query or path:lower():find(query, 1, true) then
-					total = total + 1
-					if #out < limit then out[#out+1] = {id = Agent.IdOf(scr), path = path, class = scr.ClassName} end
+		-- The function of a script that the arguments name: by a line inside it, or by its name
+		local function functionFor(R, args)
+			if args.line ~= nil then
+				local line = math.floor(tonumber(args.line) or 0)
+				if line < 1 or line > #R.nl + 1 then error(("line %s is outside the script (it has %d lines)"):format(tostring(args.line), #R.nl + 1), 0) end
+				return Analysis.FunctionAtLine(R, line)
+			elseif type(args.name) == "string" and args.name ~= "" then
+				local found = {}
+				for _,fn in ipairs(R.functions) do
+					if fn.parent and (Analysis.FunctionName(R, fn) == args.name or Analysis.ShortName(fn) == args.name or Analysis.Signature(R, fn) == args.name) then found[#found+1] = fn end
 				end
+				if #found == 0 then error(("no function is called '%s' in this script (outline lists them)"):format(args.name), 0) end
+				if #found > 1 then
+					local at = {}
+					for i = 1, math.min(#found, 8) do at[i] = tostring(found[i].line1) end
+					error(("%d functions are called '%s' (they start on lines %s): give a line"):format(#found, args.name, table.concat(at, ", ")), 0)
+				end
+				return found[1]
 			end
-			return {total = total, shown = #out, scripts = out}
-		end)
+			error("give a line inside the function, or its name (outline lists the functions)", 0)
+		end
+
+		-- the tools of the parts that keep their data to themselves: every script together, the running script
+		local shared = {scriptFor = scriptFor, rawOf = rawOf, analysisOf = analysisOf, whereIs = whereIs, functionFor = functionFor}
+		Tools.agentScan(Agent, shared)
+		Live.agent(Agent, shared)
 
 		reg("outline", function(args)
 			local scr = scriptFor(args.script)
@@ -6998,27 +7502,7 @@ local function main()
 		reg("function", function(args)
 			local scr = scriptFor(args.script)
 			local R = analysisOf(rawOf(scr))
-			local f
-			if args.line ~= nil then
-				local line = math.floor(tonumber(args.line) or 0)
-				if line < 1 or line > #R.nl + 1 then error(("line %s is outside the script (it has %d lines)"):format(tostring(args.line), #R.nl + 1), 0) end
-				f = Analysis.FunctionAtLine(R, line)
-			elseif type(args.name) == "string" and args.name ~= "" then
-				local found = {}
-				for _,fn in ipairs(R.functions) do
-					if fn.parent and (Analysis.FunctionName(R, fn) == args.name or Analysis.ShortName(fn) == args.name or Analysis.Signature(R, fn) == args.name) then found[#found+1] = fn end
-				end
-				if #found == 0 then error(("no function is called '%s' in this script (outline lists them)"):format(args.name), 0) end
-				if #found > 1 then
-					local at = {}
-					for i = 1, math.min(#found, 8) do at[i] = tostring(found[i].line1) end
-					error(("%d functions are called '%s' (they start on lines %s): give a line"):format(#found, args.name, table.concat(at, ", ")), 0)
-				end
-				f = found[1]
-			else
-				error("give a line inside the function, or its name (outline lists the functions)", 0)
-			end
-			return Analysis.BundleText(Analysis.FunctionBundle(R, f), whereIs(scr))
+			return Analysis.BundleText(Analysis.FunctionBundle(R, functionFor(R, args)), whereIs(scr))
 		end)
 
 		reg("annotations", function(args)

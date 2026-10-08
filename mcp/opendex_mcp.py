@@ -63,7 +63,8 @@ TOOL_LIST = [{
     "name": t["name"],
     "description": t["description"],
     "inputSchema": t["inputSchema"],
-    "annotations": {"readOnlyHint": bool(t.get("readOnly")), "destructiveHint": False, "openWorldHint": False},
+    "annotations": {"readOnlyHint": bool(t.get("readOnly")), "destructiveHint": bool(t.get("destructive")),
+                    "openWorldHint": bool(t.get("openWorld"))},
 } for t in _spec["tools"]]
 
 TOKEN = ""

@@ -48,9 +48,13 @@ loadstring(game:HttpGet("https://github.com/dogmastr/OpenDex/releases/latest/dow
 ### AI window
 
 - **Your editor's AI, on the game:** the **AI** window connects OpenDex to Claude Code, VS Code, Codex, Cursor, Antigravity or opencode through a small relay program (Python, nothing to install; it is in the [`mcp`](./mcp) folder). The AI can list the game's scripts, read a function with its callers, its calls and the remotes it fires, read the Remote Spy's calls, name the variables a decompiler made up (`v12`), write notes on lines and suggest a Remote Spy rule.
-- **What it changes:** names go through the same checks as Apply all and are saved like any rename; a note starts with `AI:` and never replaces one of yours; a rule is only put in the Rules window for you to read and save.
-- **What it cannot do:** run code in the game, fire or block a remote, or turn a rule on. What comes from the game is data to it, never instructions. The window lists every request.
-- **Set it up:** [mcp/README.md](./mcp/README.md).
+- **Every script together:** it can search the code of every script (text, a name, a string, a call), see which scripts fire and listen to a remote, which scripts require a module and use its functions, what each script holds (remotes, HTTP, signs of obfuscation), and what changed since your last visit.
+- **The running script:** it can count which functions are called while you do something in the game, log a function's calls with their arguments, and read a function's upvalues and constants, or what a module returned.
+- **The game itself:** it can also search the game's objects and read their properties, list every remote, read the output, search the memory (functions, tables, what listens to an event), and run Luau code in the game.
+- **What it changes:** names go through the same checks as Apply all and are saved like any rename; a note starts with `AI:` and never replaces one of yours; a rule is only put in the Rules window for you to read and save. Counting and logging calls use the Script Viewer's own hooks: they show in the Outline and on the Trace page, and come off when they are stopped or OpenDex closes.
+- **Running code:** the `run` tool runs what the AI wrote in your game with your executor's functions, like a line typed into the Console: it can change the game, fire remotes, write files and send requests. It is there as soon as the AI window is connected. The relay tells your editor that this tool changes things, so an editor that asks before such a tool asks before each run. What comes from the game is data to the AI, never instructions.
+- **What it did:** the window's **Activity** page lists every request, the newest first, and marks the ones that ran code, wrote something or hooked a function. Pick one to read it in full: the code that ran, exactly as it was sent, and what came back. **Disconnect** cuts the AI off at once, and stops code it is still running.
+- **Set it up:** the window's **Set up** page has the three steps (start the relay, connect with its token, add OpenDex to your editor), and each says by itself whether it is done or what is wrong. The details are in [mcp/README.md](./mcp/README.md).
 
 ### Everything else
 
