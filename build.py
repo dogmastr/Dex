@@ -1,32 +1,6 @@
-import os
+from pathlib import Path
 
-headerText = open("header.lua","r")
-embedStr = headerText.read() + "\n\nlocal EmbeddedModules = {\n"
-headerText.close()
-
-files = sorted(os.listdir("modules"))
-
-
-def readfile(path):
-    file = open(path,"r")
-    str = file.read()
-    file.close()
-    return str
-
-def addModuleFile(path):
-    global embedStr
-
-    moduleName = os.path.splitext(os.path.basename(path))[0]
-    moduleSource = readfile(path)
-
-    embedStr = embedStr + '["' + moduleName + '"] = function()\n' + moduleSource + '\nend,\n'
-
-for filename in files:
-    addModuleFile("modules/" + filename)
-
-embedStr = embedStr + "}"
-embedStr = embedStr + "\n" + readfile("main.lua")
-
-file = open("out.lua","w")
-file.write(embedStr)
-file.close()
+# out.lua: header.lua, then every module as a function in the table EmbeddedModules, then main.lua
+modules = sorted(Path("modules").glob("*.lua"), key=lambda path: path.name)
+embedded = "".join(f'["{path.stem}"] = function()\n{path.read_text()}\nend,\n' for path in modules)
+Path("out.lua").write_text(Path("header.lua").read_text() + "\n\nlocal EmbeddedModules = {\n" + embedded + "}\n" + Path("main.lua").read_text())

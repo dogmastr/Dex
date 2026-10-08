@@ -1859,9 +1859,11 @@ local function main()
 			--{27,"UIStroke",{ApplyStrokeMode=Enum.ApplyStrokeMode.Border,Color=Color3.fromRGB(33,33,33),Thickness=1,Parent={1}}}
 		})
 
-		local fullNameFrame = Lib.Frame.new()
+		local fullNameFrame = Instance.new("Frame") -- shows a name that is too long for its column, over the row
+		fullNameFrame.BackgroundColor3 = Settings.Theme.Main1
+		fullNameFrame.BorderColor3 = Settings.Theme.Outline1
 		local label = Lib.Label.new()
-		label.Parent = fullNameFrame.Gui
+		label.Parent = fullNameFrame
 		label.Position = UDim2.new(0,2,0,0)
 		label.Size = UDim2.new(1,-4,1,0)
 		fullNameFrame.Visible = false

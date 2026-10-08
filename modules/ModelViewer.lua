@@ -32,8 +32,7 @@ end
 
 local function main()
 	local RunService = game:GetService("RunService")
-	local UserInputService = game:GetService("UserInputService")
-	
+
 	local ModelViewer = {
 		EnableInputCamera = true,
 		IsViewing = false,
@@ -105,8 +104,9 @@ local function main()
 		
 		if ModelViewer.AutoRefresh and not updating and not refreshLoopRunning then
 			refreshLoopRunning = true
+			local session = Main.Session
 			task.spawn(function()
-				while model and ModelViewer.AutoRefresh do
+				while model and ModelViewer.AutoRefresh and Main.Session == session do -- (a reload starts a new session)
 					-- (a copy of the model each time: only while there is a window to see it in)
 					if window:IsContentVisible() then ModelViewer.ViewModel(originalModel, true) end
 					task.wait(1 / ModelViewer.RefreshRate)
@@ -160,12 +160,7 @@ local function main()
 		settingsButton.Image = "rbxassetid://6578871732"
 		settingsButton.ImageTransparency = 0.5
 		Lib.Tooltip.attach(settingsButton, "Viewer options")
-		-- mobile input check
-		if UserInputService:GetLastInputType() == Enum.UserInputType.Touch then
-			settingsButton.Visible = true
-		else
-			settingsButton.Visible = false
-		end
+		settingsButton.Visible = env.isonmobile -- (with a mouse, a right-click on the view opens the same menu)
 
 		local rotationX, rotationY = math.rad(-15), math.pi -- a little above the model, facing its front
 		local dragging = false

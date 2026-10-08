@@ -1,10 +1,3 @@
-local oldgame = oldgame or game
-
-cloneref = cloneref or function(ref)
-	return ref
-end
-
-
 -- Main vars
 local Main, Explorer, Properties, ScriptViewer, Console, SaveInstance, ModelViewer, SettingsWindow, CommandPalette, DefaultSettings, Lib
 local API, RMD
@@ -153,14 +146,13 @@ Main = (function()
 
 	Main.ModuleList = {"Explorer","Properties","ScriptAnalysis","Flowchart","ScriptViewer","Console","SaveInstance","ModelViewer","SettingsWindow","CommandPalette"}
 	Main.Elevated = false
-	Main.Version = "3.0"
+	Main.Version = "3.1"
 	Main.DefaultSettings = DefaultSettings -- what Reset buttons in the settings go back to
 	Main.Mouse = plr:GetMouse()
 	Main.AppControls = {}
 	Main.Apps = Apps
 	Main.MenuApps = {}
 	Main.MenuAppOrder = {} -- names in the order the menu tiles were made
-	Main.GitName = "AZYsGithub"
 	Main.DisplayOrders = {
 		SideWindow = 8,
 		Window = 10,
@@ -382,7 +374,7 @@ Main = (function()
 	
 	Main.LoadPluginFile = function(pluginDir)
 		if env.readfile then
-			if isfile(pluginDir) then
+			if not env.isfile or env.isfile(pluginDir) then -- (a folder in dex/plugins is not a plugin)
 				local preloadedPlugin, syntaxError = loadstring(env.readfile(pluginDir), "="..tostring(pluginDir))
 				if not preloadedPlugin then error("it does not compile: "..tostring(syntaxError), 0) end
 				local loadedPlugin = preloadedPlugin()
@@ -527,7 +519,7 @@ Main = (function()
 			if not Main.AdvancedDecompiler and (not adTriedAt or os.clock() - adTriedAt > 30) then
 				adTriedAt = os.clock()
 				local ok, result = pcall(function()
-					return loadstring(game:HttpGet("https://raw.githubusercontent.com/"..Main.GitName.."/Advanced-Decompiler-V3/refs/heads/main/init.lua"))()
+					return loadstring(game:HttpGet("https://raw.githubusercontent.com/AZYsGithub/Advanced-Decompiler-V3/refs/heads/main/init.lua"))()
 				end)
 				if ok and type(result) == "function" then Main.AdvancedDecompiler = result end
 			end
@@ -803,7 +795,11 @@ Main = (function()
 					table.insert(newClass.Properties,newMember)
 				elseif mType == "Function" then
 					newMember.Parameters = {}
-					newMember.ReturnType = member.ReturnType.Name
+					local returns = member.ReturnType
+					if returns.Name then returns = {returns} end -- (a list when the function returns several values)
+					local returnNames = {}
+					for i,ret in ipairs(returns) do returnNames[i] = ret.Name end
+					newMember.ReturnType = table.concat(returnNames,", ")
 					for c,param in pairs(member.Parameters) do
 						table.insert(newMember.Parameters,{Name = param.Name, Type = param.Type.Name})
 					end
@@ -942,9 +938,7 @@ Main = (function()
 		return {Classes = classes, Enums = enums, PropertyOrders = propertyOrders}
 	end
 
-	Main.ShowGui = Main.SecureGui
-
-	Main.CreateIntro = function(initStatus) -- TODO: Must theme and show errors
+	Main.CreateIntro = function(initStatus)
 		local gui = create({
 			{1,"ScreenGui",{Name="Intro",}},
 			{2,"Frame",{Active=true,BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderSizePixel=0,Name="Main",Parent={1},Position=UDim2.new(0.5,-175,0.5,-100),Size=UDim2.new(0,350,0,200),}},
@@ -965,7 +959,7 @@ Main = (function()
 			{17,"UIGradient",{Parent={2},Rotation=-30,Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1,0),NumberSequenceKeypoint.new(1,1,0),}),}},
 			{18,"UIDragDetector", {Parent={2}}}
 		})
-		Main.ShowGui(gui)
+		Main.SecureGui(gui)
 		local backGradient = gui.Main.UIGradient
 		local outlinesGradient = gui.Main.Outlines.UIGradient
 		local holderGradient = gui.Main.Holder.UIGradient
@@ -1538,10 +1532,12 @@ Main = (function()
 		CommandPalette.Init()
 		
 		
-		if env.readfile and listfiles then
-			if #listfiles("dex/plugins") > 0 then
+		-- (the listing fails where the folder could not be made: no plugins then, and OpenDex still starts)
+		local listed, pluginFiles = pcall(env.listfiles or error, "dex/plugins")
+		if env.readfile and listed and type(pluginFiles) == "table" then
+			if #pluginFiles > 0 then
 				intro.SetProgress("Loading Plugin Files",0.8)
-				for _, pluginDir in pairs(listfiles("dex/plugins")) do
+				for _, pluginDir in pairs(pluginFiles) do
 					local s, err = pcall(function()
 						local moduleData = Main.LoadPluginFile(pluginDir)
 						moduleData.PluginData = moduleData.PluginData or {}

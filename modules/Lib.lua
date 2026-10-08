@@ -6,7 +6,7 @@
 
 -- Common Locals
 local Main,Apps,Settings -- Main Containers
-local Explorer, ScriptViewer -- Major Apps
+local Explorer -- Major Apps
 local API,RMD,env,service,plr,create,createSimple -- Main Locals
 
 local function initDeps(data)
@@ -25,7 +25,6 @@ end
 
 local function initAfterMain()
 	Explorer = Apps.Explorer
-	ScriptViewer = Apps.ScriptViewer
 end
 
 local function main()
@@ -534,10 +533,10 @@ local function main()
 		if s and contents then return contents end
 	end
 
-	local currentextension, currentclickhandler
-	currentclickhandler = function() end
-	Lib.SaveAsPrompt = function(filename, codeToSave, ext)		
-		local win = ScriptViewer.SaveAsWindow
+	local saveAsWindow -- made by the first prompt, shown again by the later ones
+	local currentclickhandler = function() end
+	Lib.SaveAsPrompt = function(filename, codeToSave, ext)
+		local win = saveAsWindow
 		if not win then
 			win = Lib.Window.new()
 			win.Alignable = false
@@ -589,14 +588,14 @@ local function main()
 
 			win:Add(saveButton,"SaveButton")
 
-			ScriptViewer.SaveAsWindow = win
+			saveAsWindow = win
 		end
 
 		currentclickhandler = function()
 			if type(codeToSave) == "string" then
 				filename = (win.Elements.NameBox.TextBox.Text ~= "" and win.Elements.NameBox.TextBox.Text) or filename
-				currentextension = ext or filename:match("%.([^%.]+)$") or "txt"
-				filename = filename:gsub("%.[^.]+$", "") .. "." .. currentextension
+				local extension = ext or filename:match("%.([^%.]+)$") or "txt"
+				filename = filename:gsub("%.[^.]+$", "") .. "." .. extension
 
 				local codeText = codeToSave or ""
 				if env.writefile then
@@ -1740,21 +1739,17 @@ local function main()
 		end
 
 		funcs.GetExplorerIcon = function(self, obj, index)
-			if Settings.ClassIcon == "Vanilla3" then
-				obj.Size = UDim2.fromOffset(16, 16)
-
-				index = (self.ExplorerIcons.Icons[index] or 250) - 1
-				obj.ImageRectOffset = Vector2.new(funcs.ExplorerIcons.IconSize * (index % funcs.ExplorerIcons.Height), funcs.ExplorerIcons.IconSize * math.floor(index / funcs.ExplorerIcons.Height))
-				obj.ImageRectSize = Vector2.new(funcs.ExplorerIcons.IconSize, funcs.ExplorerIcons.IconSize)
-			else
+			local icons = self.ExplorerIcons.Icons
+			local fallback = 250 -- Vanilla3's icon for a class it does not list
+			if Settings.ClassIcon ~= "Vanilla3" then
 				local apiClass = API and API.Classes[index]
-				local isService = apiClass and apiClass.Tags.Service
-				
-				obj.Size = UDim2.fromOffset(16, 16)
-				index = (self.ExplorerIcons.Icons[index] or (isService and self.ExplorerIcons.Icons.Service) or self.ExplorerIcons.Icons.Placeholder) - 1
-				obj.ImageRectOffset = Vector2.new(funcs.ExplorerIcons.IconSize * (index % funcs.ExplorerIcons.Height), funcs.ExplorerIcons.IconSize * math.floor(index / funcs.ExplorerIcons.Height))
-				obj.ImageRectSize = Vector2.new(funcs.ExplorerIcons.IconSize, funcs.ExplorerIcons.IconSize)
+				fallback = (apiClass and apiClass.Tags.Service and icons.Service) or icons.Placeholder
 			end
+			index = (icons[index] or fallback) - 1
+
+			obj.Size = UDim2.fromOffset(16, 16)
+			obj.ImageRectOffset = Vector2.new(funcs.ExplorerIcons.IconSize * (index % funcs.ExplorerIcons.Height), funcs.ExplorerIcons.IconSize * math.floor(index / funcs.ExplorerIcons.Height))
+			obj.ImageRectSize = Vector2.new(funcs.ExplorerIcons.IconSize, funcs.ExplorerIcons.IconSize)
 		end
 
 		funcs.DisplayExplorerIcons = function(self, Frame, index)
@@ -4001,10 +3996,13 @@ local function main()
 				obj.Editing = false
 			end)
 
-			-- The hidden box only holds the selection, so that Ctrl+C copies it. Typing replaces that: put it back.
+			-- The hidden box only holds the selection, so that Ctrl+C copies it. Typing replaces that: put it back,
+			-- and hand what was typed to OnTyped (the Script Viewer starts a note on the line with it).
 			editBox:GetPropertyChangedSignal("Text"):Connect(function()
 				if #editBox.Text == 0 or obj.EditBoxCopying then return end
+				local typed = editBox.Text
 				obj:SetCopyableSelection()
+				if obj.OnTyped then obj.OnTyped(typed) end
 			end)
 		end
 
@@ -4216,6 +4214,9 @@ local function main()
 				local keycode = input.KeyCode
 
 				local function setupMove(key,func)
+					-- an arrow key drops the selection, as in any editor (it has just unselected the hidden box's copy of it)
+					self.SelectionRange = {{-1,-1},{-1,-1}}
+					self.GuiElems.EditBox.Text = ""
 					local endCon,finished
 					endCon = service.UserInputService.InputEnded:Connect(function(input)
 						if input.KeyCode ~= key then return end
@@ -4232,14 +4233,14 @@ local function main()
 						self.CursorX = self.FloatCursorX
 						self.CursorY = self.CursorY + 1
 						self:UpdateCursor()
-						self:JumpToCursor()
+						self:Refresh()
 					end)
 				elseif keycode == keycodes.Up then
 					setupMove(keycodes.Up,function()
 						self.CursorX = self.FloatCursorX
 						self.CursorY = self.CursorY - 1
 						self:UpdateCursor()
-						self:JumpToCursor()
+						self:Refresh()
 					end)
 				elseif keycode == keycodes.Left then
 					setupMove(keycodes.Left,function()
@@ -4251,7 +4252,7 @@ local function main()
 						end
 						self.FloatCursorX = self.CursorX
 						self:UpdateCursor()
-						self:JumpToCursor()
+						self:Refresh()
 					end)
 				elseif keycode == keycodes.Right then
 					setupMove(keycodes.Right,function()
@@ -4263,7 +4264,7 @@ local function main()
 						end
 						self.FloatCursorX = self.CursorX
 						self:UpdateCursor()
-						self:JumpToCursor()
+						self:Refresh()
 					end)
 				elseif service.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
 					if keycode == keycodes.A then
@@ -4300,10 +4301,8 @@ local function main()
 			self:UpdateCursor(input)
 
 			if on then
-				if self.Editable then
-					self.GuiElems.EditBox.Text = ""
-					self.GuiElems.EditBox:CaptureFocus()
-				end
+				self.GuiElems.EditBox.Text = ""
+				self.GuiElems.EditBox:CaptureFocus()
 			else
 				self.GuiElems.EditBox:ReleaseFocus()
 			end
@@ -4321,7 +4320,7 @@ local function main()
 			cursor.BackgroundTransparency = 0
 
 			coroutine.wrap(function()
-				while self.Editable do
+				while true do
 					Lib.FastWait(0.5)
 					if self.LastAnimTime ~= animTime then return end
 					lineTweens.Invis:Play()
@@ -4337,10 +4336,6 @@ local function main()
 			self.CursorX = x
 			self.CursorY = y
 			self:UpdateCursor()
-			self:JumpToCursor()
-		end
-
-		funcs.JumpToCursor = function(self)
 			self:Refresh()
 		end
 
@@ -4712,7 +4707,7 @@ local function main()
 				local lineText = self.Lines[relaY] or ""
 				local resText = ""
 
-				-- optional per-line background (line number -> Color3), used for bookmarks, diffs, etc.
+				-- optional per-line background (line number -> Color3), used for diffs and the flowchart's selection
 				local lineColor = self.LineColors and self.LineColors[relaY]
 				if lineColor then lineFrame.BackgroundColor3 = lineColor end
 				lineFrame.BackgroundTransparency = lineColor and 0.65 or 1
@@ -4782,10 +4777,7 @@ local function main()
 				end
 
 				if self.Lines[relaY] then
-					-- optional colour per line number (line -> "#rrggbb"), used for bookmarked lines
-					local shown = relaY == self.CursorY and ("<b>"..relaY.."</b>") or tostring(relaY)
-					local tint = self.LineNumberColors and self.LineNumberColors[relaY]
-					lineNumberStr = lineNumberStr .. (tint and ('<font color="'..tint..'">'..shown.."</font>") or shown) .. "\n"
+					lineNumberStr = lineNumberStr .. (relaY == self.CursorY and ("<b>"..relaY.."</b>") or tostring(relaY)) .. "\n"
 				end
 
 				lineFrame.Label.Text = resText
@@ -4923,8 +4915,7 @@ local function main()
 				ColoredLines = {},
 				Lines = {""},
 				LineFrames = {},
-				Editable = true, -- the cursor, selection and copying work; nothing can be typed (it shows text, it does not edit it)
-				Editing = false,
+				Editing = false, -- (the cursor, selection and copying work; nothing can be typed: it shows text, it does not edit it)
 				CursorX = 0,
 				CursorY = 0,
 				FloatCursorX = 0,
@@ -6661,26 +6652,6 @@ local function main()
 
 			local obj = setmetatable({
 				Gui = label
-			},mt)
-			return obj
-		end
-
-		return {new = new}
-	end)()
-
-	Lib.Frame = (function()
-		local props,funcs = {},{}
-
-		local mt = getGuiMT(props,funcs)
-
-		local function new()
-			local fr = Instance.new("Frame")
-			fr.BackgroundColor3 = Settings.Theme.Main1
-			fr.BorderColor3 = Settings.Theme.Outline1
-			fr.Size = UDim2.new(0,50,0,50)
-
-			local obj = setmetatable({
-				Gui = fr
 			},mt)
 			return obj
 		end

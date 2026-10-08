@@ -17,12 +17,13 @@ loadstring(game:HttpGet("https://github.com/dogmastr/OpenDex/releases/latest/dow
 ### Script Viewer
 
 - **Code navigation:** tabs, find, go to definition, find references and assignments, back and forward. All of it follows `require` into other modules.
-- **Annotations:** rename locals, add notes and bookmarks, and apply suggested names for `v12`-style variables. They are saved per script and survive a different decompile.
+- **Annotations:** rename locals, type a note on any line (click the line and type), and apply suggested names for `v12`-style variables. They are saved per script and survive a different decompile.
+- **Instances:** what stands for an instance that is in the game (`game.ReplicatedStorage.Remotes`, `script.Parent`, `:WaitForChild("Gui")`) is underlined. Ctrl+click selects it in the Explorer.
 - **Navigator sidebar:** the script's outline, callers and callees, and remote, HTTP and `loadstring` calls with resolved paths.
 - **Graphs:** a flowchart of the function under the cursor, the script's call graph, and the modules around it. Click a box to jump to its code.
 - **Live values:** constants and upvalues of the running script are outlined in the code. Hover one to read or change it, or pin it to the watch list.
 - **Tracing:** log a function's arguments, return values and caller. A tracepoint can take a condition, force a return value or change arguments.
-- **Runtime tools:** count which functions run, scan for where a value is kept, tap what goes to `loadstring` and HTTP, and open the value a module returned.
+- **Runtime tools:** count which functions run, scan for where a value is kept, and open the value a module returned.
 - **Search all scripts:** decompiles every script in the background and caches it. Search as text, whole word, Lua pattern, name, string, or a call such as `FireServer(Buy)`.
 - **Game overview:** a remote map (who fires and who listens to each remote), scripts ranked by what they contain (remotes, HTTP, obfuscation), and a diff of what changed since your last session.
 - **Decompilers:** the executor's own, or Konstant and Advanced Decompiler. Diff two decompiles, a snapshot, the previous version or another tab.
@@ -57,7 +58,7 @@ OpenDex starts with whatever the executor has. A feature it cannot run is greyed
 | Viewing scripts | `decompile`, or `getscriptbytecode` for the other decompilers |
 | Script cache and change tracking | `getscripthash`, `readfile`, `writefile`, `listfiles`, `delfile` |
 | Live values | `getgc`, `getupvalues`, `getconstants`, `setupvalue`, `setconstant` |
-| Tracing, taps, blocking remotes | `hookfunction`, `hookmetamethod` |
+| Tracing, blocking remotes | `hookfunction`, `hookmetamethod` |
 
 ## Files it writes
 
@@ -69,7 +70,7 @@ Everything goes in the executor's workspace folder.
 | `dex/layout.json` | Where the windows were left, and what each one remembers: the Script Viewer's panes, the Console's text size and switches, Save Instance's options. |
 | `dex/rbx_api.dat`, `dex/rbx_rmd.dat`, `dex/deps_version.dat` | Roblox's API dump and class metadata. Downloaded again when Roblox updates. |
 | `dex/cache/` | Every script that was decompiled, by hash, and an index per place. A cached script opens without the decompiler. |
-| `dex/annotations/` | Renames, notes and bookmarks, one file per script. |
+| `dex/annotations/` | Renames and notes, one file per script. |
 | `dex/recent.json` | The scripts opened lately, per place. |
 | `dex/plugins/` | Your plugins (see below). |
 

@@ -2,16 +2,18 @@
 	Script Viewer App Module
 
 	A read-only script viewer with tabs, find, an outline, flowcharts and a call
-	graph (built on the ScriptAnalysis parser), remote/API listing, rename/notes/bookmarks that are
+	graph (built on the ScriptAnalysis parser), remote/API listing, renames and notes that are
 	saved per script, decompiler switching and diffs, and live tracing/watching of a script's functions.
 
 	The window fills the screen beside the side panels. Its columns are the navigator, the code (tabs,
 	find bar, editor) and the graph pane (which follows the cursor). The navigator has three scopes,
 	each with its pages: Script (outline, calls, remotes, marks, and the lists that were asked for),
-	Live (the running game: trace log, watch list, scanner, taps, a module's value) and Game (every
+	Live (the running game: trace log, watch list, scanner, a module's value) and Game (every
 	script: search, remote map, contents, changes). The toolbar has Back and Forward, where the cursor
 	is (script > function > nested function), the toggles of the panes and the menus; a status bar runs
-	along the bottom. Right-clicking the code opens a menu for what is under the pointer or selected.
+	along the bottom. Right-clicking the code opens a menu for what is under the pointer or selected. Typing on a line
+	writes a note at its end; what stands for an instance of the game is underlined (Ctrl+click selects
+	it in the Explorer).
 	The running script's constants and upvalues are tinted on the code and edited there by hovering them.
 ]]
 -- Common Locals
@@ -71,7 +73,7 @@ local function main()
 	local NOTE_MARK = " -- >> " -- notes are appended to their line with this marker so they can be found again
 
 	-- tabs: one per viewed script (or diff). tab = {Script, Name, Kind = "script" | "diff", Text, Failed, Loading,
-	-- Raw (decompiler output without our header), Hash, Ann, Bookmarks, DiffKinds, Analysis/AnText (cache),
+	-- Raw (decompiler output without our header), Hash, Ann, DiffKinds, Analysis/AnText (cache),
 	-- AnState, Path, ViewY, CursorX/Y}
 	local tabs, activeTab = {}, nil
 	local backStack, fwdStack = {}, {}
@@ -90,7 +92,7 @@ local function main()
 	-- that were closed, where the cursor is for the toolbar, and the functions that go with them. Also
 	-- the columns relayout places (toolbar, leftCol, flowPane, flowDivider, sideFrame, statusBar) and the
 	-- find bar: its parts (findBar, findLabel, findBox, findCount, caseBtn), whether it is open, what it
-	-- is asking for (findMode: "find", "line", "rename" or "note"), and the matches of a find.
+	-- is asking for (findMode: "find", "line" or "rename"), and the matches of a find.
 	local Nav = {W = 320, last = {}, scopeOf = {}, chips = {}, rowInfo = {}, jumps = {}, folded = {}, closed = {}, made = 0, hits = 0,
 		findOpen = false, findMode = "find", findCase = false, matches = {}, matchIdx = 0}
 
@@ -99,7 +101,7 @@ local function main()
 	-- with a Back button.
 	local SCOPES = {
 		{Key = "script", Title = "Script", Tip = "The open script: its functions, who calls what, its remotes, your marks, and the lists you asked for", Pages = {"outline", "calls", "remotes", "marks", "refs"}},
-		{Key = "live", Title = "Live", Tip = "The running game: traced calls, watched values, the value scanner, what goes to loadstring and HTTP, what a module returned", Pages = {"trace", "watch", "scanner", "taps", "module"}},
+		{Key = "live", Title = "Live", Tip = "The running game: traced calls, watched values, the value scanner, what a module returned", Pages = {"trace", "watch", "scanner", "module"}},
 		{Key = "game", Title = "Game", Tip = "Every script of the game: search them all, the remote map, scripts by what they contain, what changed since last time", Pages = {"search", "remotemap", "contents", "changes"}},
 	}
 	local sideStacks = {}
@@ -303,7 +305,7 @@ local function main()
 	end
 
 	-- The next or the previous row of the list in the navigator that goes somewhere
-	-- (a reference, a match in another script, a bookmark, a call site).
+	-- (a reference, a match in another script, a note, a call site).
 	Nav.step = function(dir)
 		local jumps = Nav.jumps
 		if not sideOpen or #jumps == 0 then
@@ -336,7 +338,7 @@ local function main()
 	end
 
 	-- Rebuilds the open tab's first page when what it shows has changed: the outline and remotes follow
-	-- the analysis, the calls tab the function under the cursor, the marks the bookmarks and notes. A
+	-- the analysis, the calls tab the function under the cursor, the marks the notes. A
 	-- page opened from it stays put. force rebuilds regardless.
 	refreshSidebar = function(force)
 		if not sideOpen then return end
@@ -356,10 +358,11 @@ local function main()
 		renderEdit()
 	end
 
-	-- Bookmarks or notes changed, which the marks tab lists
+	-- The notes changed, which the marks tab lists and the scroll bar ticks
 	marksChanged = function()
 		marksVersion = marksVersion + 1
 		refreshSidebar()
+		refreshMarkers()
 	end
 
 	-- The pages about the open script start again with another script. The others (what the game is
@@ -955,14 +958,10 @@ local function main()
 		end
 
 		-- What the user typed into a tracepoint's boxes, as a function of the names in vars; nil and the error
-		-- when it doesn't compile. (The tap below must not log OpenDex's own use of loadstring.)
-		local compileMute = false
+		-- when it doesn't compile.
 		local function compileExpr(text, vars)
 			if not env.loadstring then return nil, "your executor has no loadstring" end
-			compileMute = true
-			local fn, err = env.loadstring(("local %s = ...\nreturn %s"):format(vars, text))
-			compileMute = false
-			return fn, err
+			return env.loadstring(("local %s = ...\nreturn %s"):format(vars, text))
 		end
 
 		-- Break on call: the calling thread waits here until Continue is pressed (or a minute has passed).
@@ -1193,7 +1192,6 @@ local function main()
 		-- on screen with it) and, after a moment, opens the card. Only the lines on screen are looked at.
 		----------------------------------------------------------------------------------------------
 
-		Live.On = true -- Init sets it from the saved layout
 		local MARK_LIMIT, CARD_W, CARD_H = 400, 300, 148
 		local codeRef, contentRef -- the editor and the window's content, given to Live.Init
 		local markFrames, marks, marksAt, drawnKey = {}, {}, {}, nil
@@ -1394,7 +1392,7 @@ local function main()
 			local scr = currentScript()
 			local rec = scr and liveCache[scr]
 			local linesFrame = codeRef.GuiElems.LinesFrame
-			local on = Live.On and R and rec and tab.Kind == "script" and not tab.Loading and not tab.Failed
+			local on = R and rec and tab.Kind == "script" and not tab.Loading and not tab.Failed
 
 			local key = "off"
 			if on then
@@ -1553,7 +1551,7 @@ local function main()
 		-- A few times a second: starts the first scan of a script that has none. Scans after that are asked for
 		-- (Live.rescan), because one forgets what was edited.
 		Live.tick = function()
-			if not Live.On or not card then return end
+			if not card then return end
 			local scr = currentScript()
 			if scr and env.getgc and not liveCache[scr] and not scanning[scr] then
 				scanInBackground(scr, function() drawMarks(true) end)
@@ -1567,11 +1565,9 @@ local function main()
 				return
 			end
 			if scanning[scr] then return end
-			Live.On = true
 			Live.hideCard()
 			liveCache[scr] = nil
 			drawMarks(true)
-			refreshToolbar()
 			toast("Scanning the running script...")
 			scanInBackground(scr, function(count)
 				toast(("Found %d running functions"):format(count), "success")
@@ -1579,17 +1575,8 @@ local function main()
 			end)
 		end
 
-		Live.toggle = function()
-			Live.On = not Live.On
-			Live.hideCard()
-			drawMarks(true)
-			refreshToolbar()
-			toast(Live.On and "Marking what can be edited in the running script" or "Marks off")
-		end
-
 		-- For the status bar
 		Live.statusText = function()
-			if not Live.On then return "Live: off" end
 			local scr = currentScript()
 			if not (scr and env.getgc) then return "" end
 			if scanning[scr] then return "Live: scanning..." end
@@ -1885,114 +1872,6 @@ local function main()
 		Live.showScanner = function() openPage("scanner") end
 
 		----------------------------------------------------------------------------------------------
-		-- Taps: what the game passes to loadstring and to the HTTP functions
-		----------------------------------------------------------------------------------------------
-
-		local tap = {On = false, Log = {}, Hooks = {}, Seq = 0, Installed = false}
-
-		local function tapEntry(kind, text, body)
-			tap.Log[#tap.Log+1] = {Time = os.clock() - traceStart, Kind = kind, Text = text, Body = body}
-			if #tap.Log > 100 then table.remove(tap.Log, 1) end
-			tap.Seq = tap.Seq + 1
-		end
-
-		local function installTaps()
-			tap.Installed = true
-			local function hooked(name, func, make)
-				local old
-				local ok = pcall(function() old = env.hookfunction(func, make(function(...) return old(...) end)) end)
-				if ok then tap.Hooks[name] = {Func = func, Old = old} end
-			end
-			if type(env.loadstring) == "function" then
-				hooked("loadstring", env.loadstring, function(old)
-					return function(chunk, ...)
-						if tap.On and not compileMute and type(chunk) == "string" then tapEntry("loadstring", chunk) end
-						return old(chunk, ...)
-					end
-				end)
-			end
-			for _,method in ipairs({"HttpGet", "HttpGetAsync"}) do
-				local okGet, func = pcall(function() return game[method] end)
-				if okGet and type(func) == "function" then
-					hooked(method, func, function(old)
-						return function(self, url, ...)
-							local res = table.pack(old(self, url, ...))
-							if tap.On then tapEntry(method, tostring(url), type(res[1]) == "string" and res[1] or nil) end
-							return table.unpack(res, 1, res.n)
-						end
-					end)
-				end
-			end
-			if type(env.request) == "function" then
-				hooked("request", env.request, function(old)
-					return function(opts, ...)
-						local res = old(opts, ...)
-						if tap.On and type(opts) == "table" then
-							tapEntry("request", tostring(opts.Method or "GET").." "..tostring(opts.Url), type(res) == "table" and type(res.Body) == "string" and res.Body or nil)
-						end
-						return res
-					end
-				end)
-			end
-		end
-
-		local function showTapEntry(entry)
-			pushEdit(entry.Kind, function()
-				addTextRow(1, #entry.Text > 400 and (entry.Text:sub(1, 400).."...") or entry.Text)
-				local code = entry.Kind == "loadstring" and entry.Text or entry.Body
-				if code then
-					Tools.action(2, "Open it as a tab", function() Tools.openChunk(("%s %.1fs"):format(entry.Kind, entry.Time), code) end)
-					Tools.action(3, ("Copy it (%d characters)"):format(#code), function()
-						if env.setclipboard then
-							env.setclipboard(code)
-							toast("Copied")
-						else
-							toast("Your executor has no setclipboard", "warn")
-						end
-					end)
-				end
-			end)
-		end
-
-		rootPages.taps = {Title = "loadstring and HTTP", Chip = "Taps", NoFilter = true, Tip = "What the game passes to loadstring and fetches over HTTP, once tapping is started", Count = function() return #tap.Log end, Build = function(page)
-				Tools.checkRow(1, "Log what goes to loadstring, HttpGet and request", tap.On, function(on)
-					if not env.hookfunction then
-						toast("Your executor has no hookfunction", "warn")
-					else
-						if not tap.Installed then installTaps() end
-						tap.On = on
-						if tap.On and next(tap.Hooks) == nil then
-							tap.On = false
-							toast("Nothing could be hooked on this executor", "warn")
-						end
-					end
-					renderEdit()
-				end)
-				local order = 1
-				if #tap.Log == 0 then
-					order = order + 1
-					addTextRow(order, tap.On and "Waiting for a call to loadstring, HttpGet or request." or "Tapping logs what the game passes to loadstring (a loader's decoded code, say) and what it fetches over HTTP. Open a chunk as a tab to read it.")
-				else
-					order = order + 1
-					Tools.action(order, "Clear the list", function()
-						tap.Log = {}
-						renderEdit()
-					end)
-				end
-				for i = #tap.Log, math.max(1, #tap.Log - 59), -1 do
-					local e = tap.Log[i]
-					local preview = e.Text:sub(1, 60):gsub("%s+", " ")
-					order = order + 1
-					Tools.link(order, ("%.1fs %s  %d chars  %s"):format(e.Time, e.Kind, #e.Text, preview), function() showTapEntry(e) end)
-				end
-				local shown = tap.Seq
-				page.Tick = function()
-					if tap.Seq ~= shown then renderEdit() end
-				end
-		end}
-		Live.showTaps = function() openPage("taps") end
-
-		----------------------------------------------------------------------------------------------
 		-- Coverage: count the calls of the script's running functions to see which ones ever run
 		----------------------------------------------------------------------------------------------
 
@@ -2142,13 +2021,11 @@ local function main()
 		Live.showWatch = function() openPage("watch") end
 		Live.traceFunction = traceFunction
 		-- OpenDex is being reloaded or closed: every hook this viewer put on the game's functions comes off
-		-- (tracepoints, call counters, the taps). A call that is stopped at a tracepoint goes on.
+		-- (tracepoints, call counters). A call that is stopped at a tracepoint goes on.
 		Live.unload = function()
 			for func in pairs(traces) do stopTrace(func) end
 			for func,rec in pairs(coverage.Hooks) do unhook(func, rec.Old) end
 			coverage.Hooks, coverage.On = {}, false
-			for _,hook in pairs(tap.Hooks) do unhook(hook.Func, hook.Old) end
-			tap.Hooks, tap.On, tap.Installed = {}, false, false
 		end
 		-- how many functions are being traced
 		Live.traceCount = function()
@@ -2338,13 +2215,13 @@ local function main()
 	end
 
 	----------------------------------------------------------------------------------------------
-	-- Line colors and scrollbar markers (bookmarks, diffs, the flowchart selection, find matches)
+	-- Line colors and scrollbar markers (notes, diffs, the flowchart selection, find matches)
 	----------------------------------------------------------------------------------------------
 
 	do
-		local BOOKMARK_COLOR, FLOW_COLOR = Color3.fromRGB(40,110,200), Color3.fromRGB(170,140,30)
+		local FLOW_COLOR = Color3.fromRGB(170,140,30)
 		local LINE_COLORS = {add = Color3.fromRGB(40,160,70), del = Color3.fromRGB(190,60,60), hunk = Color3.fromRGB(70,70,120)}
-		local MARKER_COLORS = {find = Color3.fromRGB(255,200,0), bookmark = Color3.fromRGB(70,150,255), add = Color3.fromRGB(60,200,90), del = Color3.fromRGB(220,80,80), use = Color3.fromRGB(190,190,190), write = Color3.fromRGB(255,170,80)}
+		local MARKER_COLORS = {find = Color3.fromRGB(255,200,0), note = Color3.fromRGB(70,150,255), add = Color3.fromRGB(60,200,90), del = Color3.fromRGB(220,80,80), use = Color3.fromRGB(190,190,190), write = Color3.fromRGB(255,170,80)}
 
 		refreshMarkers = function()
 			local sv = codeFrame.ScrollV
@@ -2365,9 +2242,7 @@ local function main()
 					end
 				end
 			end
-			if tab and tab.Bookmarks then
-				for line in pairs(tab.Bookmarks) do map[line - 1] = MARKER_COLORS.bookmark end
-			end
+			for _,c in ipairs(tab and tab.Ann and tab.Ann.comments or {}) do map[c.line - 1] = MARKER_COLORS.note end
 			for i, m in ipairs(Nav.matches) do
 				if i > 400 then break end
 				map[m[1] - 1] = MARKER_COLORS.find
@@ -2379,29 +2254,22 @@ local function main()
 		end
 
 		refreshDecor = function()
-			local colors, numbers = {}, {}
+			local colors = {}
 			local tab = tabs[activeTab]
 			if tab and tab.DiffKinds then
 				for line, kind in pairs(tab.DiffKinds) do colors[line] = LINE_COLORS[kind] end
-			end
-			if tab and tab.Bookmarks then
-				for line in pairs(tab.Bookmarks) do
-					colors[line] = BOOKMARK_COLOR
-					numbers[line] = "#4696ff" -- its line number too (a click on a line number bookmarks the line)
-				end
 			end
 			if flowRange and flowRange.Tab == tab then
 				for line = flowRange.From, math.min(flowRange.To, flowRange.From + 200) do colors[line] = FLOW_COLOR end
 			end
 			codeFrame.LineColors = colors
-			codeFrame.LineNumberColors = numbers
 			codeFrame:Refresh()
 			refreshMarkers()
 		end
 	end
 
 	----------------------------------------------------------------------------------------------
-	-- Annotations (renames, notes, bookmarks) saved per script and per decompile
+	-- Annotations (renames and notes) saved per script and per decompile
 	----------------------------------------------------------------------------------------------
 
 	local function checksum(text)
@@ -2424,7 +2292,20 @@ local function main()
 		local okRead, raw = pcall(env.readfile, path)
 		if not okRead then return nil end
 		local okJson, data = pcall(service.HttpService.JSONDecode, service.HttpService, raw)
-		return okJson and type(data) == "table" and data or nil
+		if not (okJson and type(data) == "table") then return nil end
+		-- there are no bookmarks any more (a note marks a line as well): the ones saved before become notes
+		for _,set in pairs(type(data.sets) == "table" and data.sets or {}) do
+			if type(set) == "table" and type(set.bookmarks) == "table" then
+				local comments = type(set.comments) == "table" and set.comments or {}
+				local noted, anchors = {}, type(set.bookAnchors) == "table" and set.bookAnchors or {}
+				for _,c in ipairs(comments) do noted[c.line] = true end
+				for i,line in ipairs(set.bookmarks) do
+					if not noted[line] then comments[#comments+1] = {line = line, text = "bookmark", a = anchors[i]} end
+				end
+				set.comments, set.bookmarks, set.bookAnchors = comments, nil, nil
+			end
+		end
+		return data
 	end
 
 	-- How many lines a text has
@@ -2451,14 +2332,12 @@ local function main()
 		local file = tab.AnnFile or {v = 1, sets = {}}
 		if type(file.sets) ~= "table" then file.sets = {} end
 		tab.AnnFile = file
-		local empty = #ann.renames == 0 and #ann.comments == 0 and #ann.bookmarks == 0 and #(ann.lost or {}) == 0
+		local empty = #ann.renames == 0 and #ann.comments == 0 and #(ann.lost or {}) == 0
 
-		-- what each note and bookmark sits on, so that they can follow it into a later decompile
+		-- what each note sits on, so that it can follow it into a later decompile
 		if Analysis then
 			local lines, offset = rawLines(tab), tab.Offset or 0
 			for _,c in ipairs(ann.comments) do c.a = Analysis.Anchor(lines, c.line - offset) end
-			ann.bookAnchors = {}
-			for i,line in ipairs(ann.bookmarks) do ann.bookAnchors[i] = Analysis.Anchor(lines, line - offset) end
 		end
 		ann.off, ann.saved = tab.Offset or 0, os.time()
 		file.sets[tab.Hash] = (not empty) and ann or nil
@@ -2488,12 +2367,12 @@ local function main()
 		return best
 	end
 
-	-- A later decompile of a script whose annotations were saved for an earlier one: puts the notes,
-	-- bookmarks and renames where the same code is now (Analysis.Reanchor). What can't be found goes to
+	-- A later decompile of a script whose annotations were saved for an earlier one: puts the notes
+	-- and renames where the same code is now (Analysis.Reanchor). What can't be found goes to
 	-- ann.lost. Returns the new annotations and how many of each were carried.
 	local function carryOver(tab, old, text)
 		local lines, offset = rawLines(tab), tab.Offset or 0
-		local ann = {renames = {}, comments = {}, bookmarks = {}, lost = {}}
+		local ann = {renames = {}, comments = {}, lost = {}}
 		local anchors, owners = {}, {}
 		local function add(anchor, kind, item)
 			local n = #anchors + 1
@@ -2501,10 +2380,6 @@ local function main()
 		end
 		for _,c in ipairs(old.comments or {}) do
 			if type(c.a) == "table" then add(c.a, "note", c) end
-		end
-		for i,line in ipairs(old.bookmarks or {}) do
-			local a = old.bookAnchors and old.bookAnchors[i]
-			if type(a) == "table" then add(a, "bookmark", line) end
 		end
 		for _,r in ipairs(old.renames or {}) do
 			if type(r.a) == "table" and r.slot then add(r.a, "rename", r) end
@@ -2528,7 +2403,7 @@ local function main()
 			return declared[line] or {}
 		end
 
-		local counts = {note = 0, bookmark = 0, rename = 0, lost = 0}
+		local counts = {note = 0, rename = 0, lost = 0}
 		for n,owner in ipairs(owners) do
 			local rawLine = at[n]
 			local line = rawLine and rawLine + offset
@@ -2536,9 +2411,6 @@ local function main()
 			local placed = false
 			if line and owner.kind == "note" then
 				ann.comments[#ann.comments+1] = {line = line, text = item.text}
-				placed = true
-			elseif line and owner.kind == "bookmark" then
-				ann.bookmarks[#ann.bookmarks+1] = line
 				placed = true
 			elseif line then
 				local at2 = declaredOn(line)[item.slot]
@@ -2551,15 +2423,7 @@ local function main()
 				counts[owner.kind] = counts[owner.kind] + 1
 			else
 				counts.lost = counts.lost + 1
-				local what
-				if owner.kind == "note" then
-					what = item.text
-				elseif owner.kind == "rename" then
-					what = item.orig.." -> "..item.name
-				else
-					what = anchors[n].key -- a bookmark: what its line said
-				end
-				ann.lost[#ann.lost+1] = {kind = owner.kind, text = what}
+				ann.lost[#ann.lost+1] = {kind = owner.kind, text = owner.kind == "note" and item.text or (item.orig.." -> "..item.name)}
 			end
 		end
 		return ann, counts
@@ -2581,7 +2445,6 @@ local function main()
 			local shift = tab.Offset - (ann.off or tab.Offset)
 			if shift ~= 0 then
 				for _,c in ipairs(ann.comments or {}) do c.line = c.line + shift end
-				for i,line in ipairs(ann.bookmarks or {}) do ann.bookmarks[i] = line + shift end
 				ann.off = tab.Offset
 			end
 		else
@@ -2589,12 +2452,10 @@ local function main()
 			if old then ann, carried = carryOver(tab, old, text) end
 			ann = ann or {}
 		end
-		ann.renames, ann.comments, ann.bookmarks, ann.lost = ann.renames or {}, ann.comments or {}, ann.bookmarks or {}, ann.lost or {}
+		ann.renames, ann.comments, ann.lost = ann.renames or {}, ann.comments or {}, ann.lost or {}
 		tab.Ann = ann
-		tab.Bookmarks = {}
-		for _,line in ipairs(ann.bookmarks) do tab.Bookmarks[line] = true end
 		tab.PendingNotes = #ann.comments > 0
-		if carried and carried.note + carried.bookmark + carried.rename + carried.lost > 0 then
+		if carried and carried.note + carried.rename + carried.lost > 0 then
 			tab.Carried = carried
 			saveAnn(tab) -- under this version's hash, so the next visit finds it directly
 		end
@@ -2674,23 +2535,6 @@ local function main()
 			end
 		end
 		tab.Ann.renames[#tab.Ann.renames+1] = {index = index, orig = sym.name, name = newName, a = Analysis.Anchor(rawLines(tab), line - (tab.Offset or 0)), slot = slot}
-	end
-
-	-- Bookmarks the cursor's line, or the given one (a click on its line number), or takes the bookmark off.
-	local function toggleBookmark(line)
-		local tab = scriptTab()
-		if not tab then return end
-		line = type(line) == "number" and line or cursorLine() -- (a menu passes its item's name)
-		tab.Bookmarks[line] = (not tab.Bookmarks[line]) or nil
-
-		local list = {}
-		for l in pairs(tab.Bookmarks) do list[#list+1] = l end
-		table.sort(list)
-		tab.Ann.bookmarks = list
-		saveAnn(tab)
-		marksChanged()
-		refreshDecor()
-		toast(tab.Bookmarks[line] and ("Bookmarked line "..line) or ("Removed bookmark on line "..line))
 	end
 
 	local function setNote(line, text)
@@ -2838,14 +2682,14 @@ local function main()
 		showMatch()
 	end
 
-	-- Opens the bar above the code to find text, or for a line number, a new name or a note. quiet is for
+	-- Opens the bar above the code to find text, or for a line number or a new name. quiet is for
 	-- a search that comes back by itself: it takes neither the keyboard nor the cursor.
 	local function openBar(mode, prefill, quiet)
-		-- a rename, a note or a line number borrows the bar from a search, which comes back after it
+		-- a rename or a line number borrows the bar from a search, which comes back after it
 		if Nav.findOpen and Nav.findMode == "find" and mode ~= "find" then Nav.findKeep = Nav.findBox:GetText() end
 		Nav.findQuiet = quiet and os.clock() or nil
 		Nav.findOpen, Nav.findMode = true, mode
-		Nav.findLabel.Text = ({find = "Find", line = "Line", rename = "Rename", note = "Note"})[mode]
+		Nav.findLabel.Text = ({find = "Find", line = "Line", rename = "Rename"})[mode]
 		Nav.findCount.Text = ""
 		Nav.matches, Nav.matchIdx = {}, 0
 		for _,b in ipairs(navButtons) do b.Visible = mode == "find" end
@@ -2912,9 +2756,6 @@ local function main()
 			closeBar()
 		elseif Nav.findMode == "rename" then
 			commitRename(text)
-			closeBar()
-		elseif Nav.findMode == "note" then
-			setNote(cursorLine(), text)
 			closeBar()
 		end
 	end
@@ -2995,9 +2836,29 @@ local function main()
 		openBar("rename", sym.name)
 	end
 
-	local function addNote()
-		if not scriptTab() then return end
-		openBar("note", noteOn(cursorLine()))
+	-- A note is typed on its line: a box (Nav.noteBox) opens where the note is, or goes, at the end of the
+	-- cursor's line. Typing in the code opens it with what was typed, and so do the menus. Enter or a click
+	-- elsewhere keeps the note, Escape leaves it as it was, and an emptied note is removed.
+	local function addNote(typed)
+		local tab = tabs[activeTab]
+		if not (tab and tab.Kind == "script" and tab.Ann) then return end
+		local line = cursorLine()
+		scrollToLine(line) -- (the cursor's line may have been scrolled out of sight)
+		local cellW, cellH = math.ceil(codeFrame.FontSize / 2), codeFrame.FontSize
+		local code = (codeFrame.Lines[line] or ""):gsub("%s%-%-%s>>%s.*$", "")
+		-- where the note's text starts, kept on screen when the line runs past the edge
+		local markW = #NOTE_MARK * cellW
+		local x = math.clamp((#code - codeFrame.ViewX) * cellW + markW, markW, math.max(markW, codeFrame.GuiElems.LinesFrame.AbsoluteSize.X - 240))
+		local box = Nav.noteBox
+		Nav.noteLine, Nav.noteTab = line, tab
+		box.Text = noteOn(line)..(typed and typed:gsub("%c", "") or "")
+		box.Position = UDim2.fromOffset(x, (line - 1 - codeFrame.ViewY) * cellH)
+		box.Size = UDim2.new(1, -x, 0, cellH)
+		box.Visible = true
+		task.defer(function()
+			box:CaptureFocus()
+			box.CursorPosition = #box.Text + 1
+		end)
 	end
 
 	----------------------------------------------------------------------------------------------
@@ -3112,9 +2973,20 @@ local function main()
 		local obj = path.root == "game" and game or scr
 		for _,step in ipairs(path.steps) do
 			if not obj then return nil end
-			if step == "Parent" then obj = obj.Parent else obj = obj:FindFirstChild(step) end
+			-- what obj.Step gives in the game: a property that holds an instance (Parent, LocalPlayer,
+			-- CurrentCamera), else the child of that name
+			local ok, value = pcall(function() return obj[step] end)
+			obj = ok and typeof(value) == "Instance" and value or obj:FindFirstChild(step)
 		end
 		return obj
+	end
+
+	-- The instance a token of the code stands for (Analysis.PathAt), if it exists right now. The game
+	-- itself is left out: there is nothing to select.
+	Tools.instanceAt = function(R, ti)
+		local path = Analysis.PathAt(R, ti)
+		local inst = path and resolveInstance(path, currentScript())
+		return inst ~= game and inst or nil
 	end
 
 	rootPages.remotes = {Title = "Remotes & APIs", Chip = "Remotes", Tip = "The remote, HTTP and loadstring calls in this script", Count = function()
@@ -3155,41 +3027,24 @@ local function main()
 		end, 1000)
 	end}
 
-	rootPages.marks = {Title = "Bookmarks and notes", Chip = "Marks", Tip = "Your bookmarks and notes in this script, and suggested names for its variables", Count = function()
+	rootPages.marks = {Title = "Notes", Chip = "Marks", Tip = "Your notes in this script, and suggested names for its variables", Count = function()
 		local tab = tabs[activeTab]
-		if not (tab and tab.Kind == "script" and tab.Bookmarks) then return nil end
-		local n = #(tab.Ann and tab.Ann.comments or {})
-		for _ in pairs(tab.Bookmarks) do n = n + 1 end
-		return n
+		if not (tab and tab.Kind == "script" and tab.Ann) then return nil end
+		return #tab.Ann.comments
 	end, Build = function()
 		local tab = tabs[activeTab]
-		if not tab or tab.Kind ~= "script" or not tab.Bookmarks then addTextRow(1, "Open a script first.") return end
+		if not tab or tab.Kind ~= "script" or not tab.Ann then addTextRow(1, "Open a script first.") return end
 
-		local lines = {}
-		for line in pairs(tab.Bookmarks) do lines[#lines+1] = line end
-		table.sort(lines)
 		local notes = {}
-		for _,c in ipairs(tab.Ann and tab.Ann.comments or {}) do notes[#notes+1] = c end
+		for _,c in ipairs(tab.Ann.comments) do notes[#notes+1] = c end
 		table.sort(notes, function(a, b) return a.line < b.line end)
 
 		Tools.link(1, "Suggest names for the variables", function() Tools.suggestNames() end)
 		local order = 2
-		Tools.head(order, "Bookmarks", #lines)
-		if #lines == 0 then
-			order = order + 1
-			addTextRow(order, "A click on a line number bookmarks a line.")
-		end
-		for _,line in ipairs(lines) do
-			order = order + 1
-			local text = (codeFrame.Lines[line] or ""):gsub("^%s+", "")
-			addNavRow(order, text:sub(1, 200), function() jumpTo(line, 0) end, ":"..line)
-		end
-
-		order = order + 1
 		Tools.head(order, "Notes", #notes)
 		if #notes == 0 then
 			order = order + 1
-			addTextRow(order, "Right-click a line to add a note to it.")
+			addTextRow(order, "Click a line of the code and type: the note goes at the end of the line.")
 		end
 		for _,c in ipairs(notes) do
 			order = order + 1
@@ -3430,7 +3285,7 @@ local function main()
 		tab.RawLines = nil
 		tab.Decompiler = decompiler
 		tab.Analysis = nil
-		tab.Ann, tab.Bookmarks, tab.AnnFile = nil, nil, nil
+		tab.Ann, tab.AnnFile = nil, nil
 		if ok then
 			local patched = attachAnnotations(tab, text, raw)
 			text = patched
@@ -3440,7 +3295,7 @@ local function main()
 
 		local c = tab.Carried
 		if c then
-			toast(("The script has changed since you annotated it: %d notes, %d bookmarks and %d renames carried over%s"):format(c.note, c.bookmark, c.rename, c.lost > 0 and (", "..c.lost.." could not be placed (see the Marks tab)") or ""), c.lost > 0 and "warn" or "info")
+			toast(("The script has changed since you annotated it: %d notes and %d renames carried over%s"):format(c.note, c.rename, c.lost > 0 and (", "..c.lost.." could not be placed (see the Marks tab)") or ""), c.lost > 0 and "warn" or "info")
 		end
 		if tab.Changed and track then
 			toast("The script has changed since you last opened it. Decompiler > Diff against the previous version shows how")
@@ -3456,7 +3311,7 @@ local function main()
 			task.delay(0.05, function()
 				if tabs[activeTab] == tab then
 					refreshFlow()
-					marksVersion = marksVersion + 1 -- the saved bookmarks and notes were just loaded
+					marksVersion = marksVersion + 1 -- the saved notes were just loaded
 					refreshSidebar(true)
 				end
 			end)
@@ -5242,7 +5097,7 @@ local function main()
 			return (typeof(obj) == "Instance" and obj ~= game and obj:IsA("LuaSourceContainer")) and obj or nil
 		end
 
-		-- The scripts of the game that have notes, bookmarks or renames saved: {Script, Path, Text}. Looked up
+		-- The scripts of the game that have notes or renames saved: {Script, Path, Text}. Looked up
 		-- again after a quarter of a minute.
 		Tools.annotated = function()
 			if state.Annotated and os.clock() - state.AnnotatedAt < 15 then return state.Annotated end
@@ -5263,7 +5118,7 @@ local function main()
 					local set = file and type(file.sets) == "table" and newestSet(file)
 					if set then
 						local parts = {}
-						for _,kind in ipairs({{"comments", "notes"}, {"bookmarks", "bookmarks"}, {"renames", "renames"}}) do
+						for _,kind in ipairs({{"comments", "notes"}, {"renames", "renames"}}) do
 							local n = #(type(set[kind[1]]) == "table" and set[kind[1]] or {})
 							if n > 0 then parts[#parts+1] = n.." "..kind[2] end
 						end
@@ -5445,10 +5300,10 @@ local function main()
 				order = order + 1
 				Tools.head(order, "More")
 				order = order + 1
-				Tools.link(order, "Scripts with your notes, bookmarks or renames", function()
+				Tools.link(order, "Scripts with your notes or renames", function()
 					pushEdit("Scripts with your notes", function()
 						local list = Tools.annotated()
-						if #list == 0 then addTextRow(1, "No script of this game has notes, bookmarks or renames saved (or your executor cannot list files).") end
+						if #list == 0 then addTextRow(1, "No script of this game has notes or renames saved (or your executor cannot list files).") end
 						eachRow(list, 1, function(n, _, a)
 							addNavRow(n, ("%s  (%s)"):format(tail(a.Path, 34), a.Text), function() ScriptViewer.ViewScript(a.Script) end)
 						end, 300)
@@ -5548,6 +5403,8 @@ local function main()
 		Tools.infoFor = function(R, ti)
 			local kind = R.tt[ti]
 			if kind == "num" then return describeNumber(R.tv[ti]) end
+			local inst = Tools.instanceAt(R, ti)
+			if inst then return {Title = inst.ClassName.." "..Tools.fullName(inst), Lines = {"Ctrl+click selects it in the Explorer"}} end
 			if kind ~= "name" then return nil end
 
 			-- the method of a remote or http call: where it points
@@ -5638,21 +5495,13 @@ local function main()
 		menu:Show(button.AbsolutePosition.X, button.Parent == Nav.statusBar and y or (y + button.AbsoluteSize.Y))
 	end
 
-	local fileMenu, runMenu, decompilerMenu, codeMenu
+	local fileMenu, decompilerMenu, codeMenu
 
 	local function showFileMenu(button)
 		fileMenu = freshMenu(fileMenu, 190)
 		fileMenu:Add({Name = "Copy to Clipboard", Disabled = env.setclipboard == nil, Reason = "Your executor has no setclipboard", OnClick = copyAll})
 		fileMenu:Add({Name = "Save to File...", Disabled = env.writefile == nil, Reason = "Your executor has no writefile", OnClick = saveFile})
 		showUnder(fileMenu, button)
-	end
-
-	-- What runs something. (Tracing, watching, the scanner and the taps are the Live pages of the navigator.)
-	local function showRunMenu(button)
-		runMenu = freshMenu(runMenu, 230)
-		local live = liveReason()
-		runMenu:Add({Name = "Execute", Disabled = env.loadstring == nil, Reason = "Your executor has no loadstring", Tooltip = "Run the text in the editor", OnClick = executeText})
-		showUnder(runMenu, button)
 	end
 
 	local function decompilerItems()
@@ -5734,7 +5583,6 @@ local function main()
 		local menu = codeMenu
 		local R, why = tabAnalysis()
 		local scriptReason = needsScript()
-		local tab = tabs[activeTab]
 		local line = cursorLine()
 		-- the selected token, else the one the click was on: the one the outline showed, not the one just before it
 		local ti
@@ -5761,6 +5609,10 @@ local function main()
 		menu:Add({Name = "Go to definition   Ctrl+click", Disabled = noName ~= false or not Analysis.Definition(R, ti), Reason = noName or "Nothing in this script defines it", OnClick = gotoDefinition})
 		menu:Add({Name = "Find references", Disabled = noName ~= false, Reason = noName or nil, OnClick = function() showReferences() end})
 		menu:Add({Name = "Find writes (assignments)", Disabled = noName ~= false, Reason = noName or nil, OnClick = function() showReferences(true) end})
+		local okInst, inst = pcall(Tools.instanceAt, R, ti) -- (fails with no analysis or no token)
+		if okInst and inst then
+			menu:Add({Name = ("Select %s in Explorer   Ctrl+click"):format(clip(inst.Name, 22)), OnClick = function() Explorer.SelectObj(inst) end})
+		end
 		-- what to look for in every script: the selection, else the name or string clicked
 		local searchFor
 		if selecting then
@@ -5777,12 +5629,10 @@ local function main()
 		local renameReason = scriptReason or (kind ~= "name" and "Right-click a variable") or (not isLocal and "Only local variables and parameters can be renamed") or false
 		menu:Add({Name = isLocal and ("Rename '%s'..."):format(clip(sym.name, 20)) or "Rename variable...", Disabled = renameReason ~= false, Reason = renameReason or nil, OnClick = renameSymbol})
 		local note = scriptReason == false and noteOn(line) or ""
-		menu:Add({Name = (note ~= "" and "Edit the note on line " or "Add a note to line ")..line, Disabled = scriptReason ~= false, Reason = scriptReason or nil, OnClick = addNote})
+		menu:Add({Name = (note ~= "" and "Edit the note on line " or "Add a note to line ")..line, Disabled = scriptReason ~= false, Reason = scriptReason or nil, Tooltip = "Or click the line and type", OnClick = function() addNote() end})
 		if note ~= "" then
 			menu:Add({Name = "Remove the note", OnClick = function() setNote(line, "") end})
 		end
-		local marked = scriptReason == false and tab.Bookmarks and tab.Bookmarks[line]
-		menu:Add({Name = (marked and "Remove the bookmark on line " or "Bookmark line ")..line, Disabled = scriptReason ~= false, Reason = scriptReason or nil, OnClick = toggleBookmark})
 
 		if scriptReason == false then
 			menu:AddDivider("Running script")
@@ -5894,20 +5744,17 @@ local function main()
 		add("Find references", function() showReferences() end)
 		add("Find writes (assignments)", function() showReferences(true) end)
 		add("Rename variable", renameSymbol, scriptReason)
-		add("Add or edit note", addNote, scriptReason)
-		add("Toggle bookmark", toggleBookmark, scriptReason)
+		add("Add or edit note", function() addNote() end, scriptReason)
 		add("Back to the previous location", navBack)
 		add("Forward to the next location", navForward)
 
 		add("Copy script to clipboard", copyAll, env.setclipboard == nil and "Your executor has no setclipboard")
 		add("Save script to file", saveFile, env.writefile == nil and "Your executor has no writefile")
 		add("Execute script", executeText, env.loadstring == nil and "Your executor has no loadstring")
-		add(Live.On and "Hide live marks" or "Show live marks", function() Live.toggle() end, live)
 		add("Rescan the running functions", function() Live.rescan() end, live)
 		add("Trace log", function() Live.showTrace() end, env.hookfunction == nil and "Your executor has no hookfunction")
 		add("Watch list", function() Live.showWatch() end)
 		add("Value scanner", function() Live.showScanner() end, live or (env.getupvalues == nil and "Your executor has no getupvalues"))
-		add("Tap loadstring and HTTP", function() Live.showTaps() end, env.hookfunction == nil and "Your executor has no hookfunction")
 		add(Live.coverageOn() and "Stop counting calls" or "Count which functions run", function() Live.toggleCoverage() end, live or (env.hookfunction == nil and "Your executor has no hookfunction"))
 		add("The value this module returned", function() Live.showModule() end, live)
 
@@ -5986,7 +5833,6 @@ local function main()
 		toolToggles.find.Active = Nav.findOpen and Nav.findMode == "find"
 		toolToggles.flow.Active = flowOpen
 		toolToggles.side.Active = sideOpen
-		if toolToggles.live then toolToggles.live.Active = Live.On end
 		for _,info in pairs(toolToggles) do paintToolButton(info) end
 	end
 
@@ -6130,7 +5976,6 @@ local function main()
 			if saved.flow ~= nil then flowOpen = saved.flow and true or false end
 			if tonumber(saved.ratio) then flowRatio = math.clamp(saved.ratio, 0.2, 0.8) end
 			if saved.side ~= nil then sideOpen = saved.side and true or false end
-			if saved.live ~= nil then Live.On = saved.live and true or false end
 			if type(saved.skip) == "table" then
 				for key in pairs(Tools.Skip) do
 					if saved.skip[key] ~= nil then Tools.Skip[key] = saved.skip[key] and true or false end
@@ -6147,19 +5992,18 @@ local function main()
 			Nav.home, sideTab, Nav.auto = sideTab, "search", true
 		end
 		Main.Layout.Providers.Notepad = function()
-			return {flow = flowOpen, ratio = flowRatio, side = sideOpen, tab = Nav.auto and Nav.home or sideTab, width = Nav.W, live = Live.On, skip = table.clone(Tools.Skip)}
+			return {flow = flowOpen, ratio = flowRatio, side = sideOpen, tab = Nav.auto and Nav.home or sideTab, width = Nav.W, skip = table.clone(Tools.Skip)}
 		end
 		table.insert(Main.Layout.ResetHandlers, function()
-			flowOpen, flowRatio, sideOpen, Live.On = Flowchart ~= nil, 0.45, true, true
+			flowOpen, flowRatio, sideOpen = Flowchart ~= nil, 0.45, true
 			Nav.W = 320
 			for key in pairs(Tools.Skip) do Tools.Skip[key] = true end
-			Live.draw(true)
 			relayout()
 			refreshFlow()
 			refreshSidebar(true)
 		end)
 
-		-- Toolbar: Back, Forward, where the cursor is | Find, Navigator, Graph, Live | File, Run, Decompiler
+		-- Toolbar: Back, Forward, where the cursor is | Find, Navigator, Graph | File, Execute, Decompiler
 		Nav.toolbar = createSimple("Frame", {Name = "Toolbar", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(1,0,0,TOOL_H), Parent = content})
 		createSimple("Frame", {BackgroundColor3 = Settings.Theme.Outline1, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1), Parent = Nav.toolbar})
 
@@ -6232,12 +6076,12 @@ local function main()
 		toolSeparator()
 		toolToggles.side = toolButton("Navigator", "Show or hide the navigator: the script's outline, calls, remotes and marks, the running game, and every script of the game", function() setSideOpen(not sideOpen) end)
 		toolToggles.flow = toolButton("Graph", "Show or hide the graph pane: a function's flowchart, the call graph, the modules around the script", function() setFlowOpen(not flowOpen) end)
-		toolToggles.live = toolButton("Live", function()
-			return liveReason() or "Tint the constants (amber) and upvalues (violet) of the running script that can be edited; hover one to see or change its value. Scans the game's functions when a script opens"
-		end, function() Live.toggle() end)
 		toolSeparator()
 		toolButton("File", "Copy the text or save it to a file", showFileMenu, true)
-		toolButton("Run", "Run the text, or dump the upvalues and constants of the script's running functions", showRunMenu, true)
+		local execute = toolButton("Execute", env.loadstring and "Run the text in the viewer" or "Your executor has no loadstring", function()
+			if env.loadstring then executeText() end
+		end)
+		if not env.loadstring then execute.Gui.TextColor3 = Settings.Theme.PlaceholderText end -- greyed, like Back with nowhere to go
 		toolButton("Decompiler", "Decompile again with another decompiler, compare two decompiles, snapshots", showDecompilerMenu, true)
 		group.Size = UDim2.new(0,toolX,1,0)
 
@@ -6266,17 +6110,51 @@ local function main()
 			Parent = Nav.leftCol,
 		})
 
-		-- A click on a line number bookmarks that line (bookmarked numbers are blue)
-		local numbers = codeFrame.GuiElems.LineNumbersLabel
-		numbers.Active = true
-		numbers.InputBegan:Connect(function(input)
-			if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-			local line = math.floor((Main.Mouse.Y - numbers.AbsolutePosition.Y) / codeFrame.FontSize) + codeFrame.ViewY + 1
-			if codeFrame.Lines[line] and tabs[activeTab] and tabs[activeTab].Kind == "script" then toggleBookmark(line) end
+		-- The box a note is typed in, on its line (addNote), with the marker of a note in front of it
+		local noteMarkW = #NOTE_MARK * math.ceil(codeFrame.FontSize / 2)
+		Nav.noteBox = createSimple("TextBox", {
+			Name = "Note",
+			BackgroundColor3 = Settings.Theme.Syntax.Background,
+			BorderSizePixel = 0,
+			ClearTextOnFocus = false,
+			Font = Enum.Font.Code,
+			TextSize = codeFrame.FontSize,
+			TextColor3 = Settings.Theme.Syntax.Note,
+			PlaceholderText = "note: Enter keeps it, Escape does not",
+			PlaceholderColor3 = Settings.Theme.PlaceholderText,
+			Text = "",
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Visible = false,
+			ZIndex = 6,
+			Parent = codeFrame.GuiElems.LinesFrame,
+		})
+		createSimple("TextLabel", {
+			Name = "Mark",
+			BackgroundColor3 = Settings.Theme.Syntax.Background,
+			BorderSizePixel = 0,
+			Position = UDim2.new(0,-noteMarkW,0,0),
+			Size = UDim2.new(0,noteMarkW,1,0),
+			Font = Enum.Font.Code,
+			TextSize = codeFrame.FontSize,
+			TextColor3 = Settings.Theme.Syntax.Note,
+			Text = NOTE_MARK,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			ZIndex = 6,
+			Parent = Nav.noteBox,
+		})
+		Nav.noteBox.FocusLost:Connect(function(_, input)
+			local line, tab = Nav.noteLine, Nav.noteTab
+			Nav.noteLine, Nav.noteTab = nil, nil
+			Nav.noteBox.Visible = false
+			if not line or tabs[activeTab] ~= tab or (input and input.KeyCode == Enum.KeyCode.Escape) then return end
+			local text = Nav.noteBox.Text:gsub("%c", " "):gsub("%s+$", "")
+			if text ~= noteOn(line) then setNote(line, text) end
 		end)
+		codeFrame.OnTyped = addNote -- typing in the code starts a note on the cursor's line
 
 		-- Right-click on the code: navigate, annotate and look at the running script, for what is under the
-		-- pointer. Ctrl+click on a name goes to its definition.
+		-- pointer. Ctrl+click on what stands for an instance selects it in the Explorer, on another name it
+		-- goes to its definition.
 		codeFrame.GuiElems.LinesFrame.InputBegan:Connect(function(input)
 			if input.UserInputType == Enum.UserInputType.MouseButton2 then
 				showCodeMenu()
@@ -6285,7 +6163,10 @@ local function main()
 				local R = tab and tab.Kind ~= "diff" and tab.Analysis
 				local col, row = codeFrame:MouseCell()
 				local ti = R and Analysis.TokenAtCell(R, row + 1, col)
-				if ti and R.tt[ti] == "name" then
+				local ok, inst = pcall(Tools.instanceAt, R, ti)
+				if ti and ok and inst then
+					Explorer.SelectObj(inst)
+				elseif ti and R.tt[ti] == "name" then
 					task.defer(gotoDefinition) -- once the editor has put the cursor where the click was
 				end
 			end
@@ -6485,15 +6366,58 @@ local function main()
 			refreshMarkers()
 		end
 
-		-- the marks move with the text
-		Main.Track(codeFrame.ScrollV.Scrolled:Connect(function()
+		-- What stands for an instance that is in the game right now is tinted and underlined: the names of a
+		-- path (game.A.B, script.Parent), the string of :GetService("A") or :WaitForChild("B"), a local set
+		-- from one of these. Ctrl+click (or the right-click menu) selects it in the Explorer. Only the lines
+		-- on screen are looked at, and again every two seconds, as instances come and go.
+		local instFrames, instDrawn = {}, nil
+		local INSTANCE_COLOR = Color3.fromRGB(80,210,190)
+		Nav.drawInstances = function()
+			local tab = tabs[activeTab]
+			local R = tab and (tab.Kind == "script" or tab.Kind == "chunk") and not tab.Loading and tab.Analysis
+			local linesFrame = codeFrame.GuiElems.LinesFrame
+			local key = R and table.concat({tostring(R), codeFrame.ViewX, codeFrame.ViewY, linesFrame.AbsoluteSize.X, linesFrame.AbsoluteSize.Y, os.clock() // 2}, ":") or "none"
+			if key == instDrawn then return end
+			instDrawn = key
+			local cellW, cellH = math.ceil(codeFrame.FontSize / 2), codeFrame.FontSize
+			local viewX, viewY = codeFrame.ViewX, codeFrame.ViewY
+			local n = 0
+			for line = viewY + 1, R and math.min(#codeFrame.Lines, viewY + math.ceil(linesFrame.AbsoluteSize.Y / cellH) + 1) or 0 do
+				local first, last = Analysis.TokensOnLine(R, line)
+				local lineStart, text = Analysis.LineStart(R, line), codeFrame.Lines[line]
+				for ti = first or 1, last or 0 do
+					local kind, from, to = R.tt[ti], R.tp[ti], R.te[ti]
+					local col, length = from - lineStart, to - from + 1
+					-- a name or a string on this line that is still what the analysis saw
+					if n < 400 and (kind == "name" or kind == "str") and R.tel[ti] == line and text:sub(col + 1, col + length) == R.src:sub(from, to) then
+						local ok, inst = pcall(Tools.instanceAt, R, ti)
+						if ok and inst then
+							n = n + 1
+							local f = instFrames[n]
+							if not f then
+								f = createSimple("Frame", {Name = "Instance", BackgroundColor3 = INSTANCE_COLOR, BackgroundTransparency = 0.96, BorderSizePixel = 0, ZIndex = 3, Parent = linesFrame})
+								createSimple("Frame", {Name = "Line", BackgroundColor3 = INSTANCE_COLOR, BackgroundTransparency = 0.6, BorderSizePixel = 0, Position = UDim2.new(0,0,1,-1), Size = UDim2.new(1,0,0,1), ZIndex = 3, Parent = f})
+								instFrames[n] = f
+							end
+							f.Position = UDim2.fromOffset((col - viewX) * cellW, (line - 1 - viewY) * cellH)
+							f.Size = UDim2.fromOffset(length * cellW, cellH)
+							f.Visible = true
+						end
+					end
+				end
+			end
+			for i = n + 1, #instFrames do instFrames[i].Visible = false end
+		end
+
+		-- the marks move with the text, and a note being typed is kept where it was
+		local function scrolled()
+			if Nav.noteLine then Nav.noteBox:ReleaseFocus() end
 			Live.draw()
 			Nav.drawUses()
-		end))
-		Main.Track(codeFrame.ScrollH.Scrolled:Connect(function()
-			Live.draw()
-			Nav.drawUses()
-		end))
+			Nav.drawInstances()
+		end
+		Main.Track(codeFrame.ScrollV.Scrolled:Connect(scrolled))
+		Main.Track(codeFrame.ScrollH.Scrolled:Connect(scrolled))
 
 		-- Tab strip, and at its end the list of the tabs (open, and closed lately)
 		Nav.tabList = createSimple("TextButton", {Name = "TabList", BackgroundColor3 = Settings.Theme.Main2, BorderSizePixel = 0, Size = UDim2.new(0,22,0,TAB_H), Text = "", Visible = false, Parent = Nav.leftCol})
@@ -6823,6 +6747,7 @@ local function main()
 			Live.draw()
 			Nav.trackUses()
 			Nav.drawUses()
+			Nav.drawInstances()
 			updateStatus()
 			updateOutline()
 			-- the call graph shows how often each function was called while that is being counted

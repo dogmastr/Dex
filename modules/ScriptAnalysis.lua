@@ -1609,6 +1609,27 @@ local function main()
 		return raw()
 	end
 
+	-- The resolved path a token stands for, or nil: the last name of game.A.B, the string of
+	-- :GetService("A") or :WaitForChild("B"), or a name that was set from one of these.
+	function A.PathAt(R, ti)
+		local byArg = R.pathArgs -- the first argument of every method call, when it is a string
+		if not byArg then
+			byArg = {}
+			for _, node in pairs(R.members) do
+				local arg = node.k == "Call" and node.args[1]
+				if arg and arg.k == "String" then byArg[arg.s] = node end
+			end
+			R.pathArgs = byArg
+		end
+		local node = byArg[ti]
+		if not node and R.tt[ti] == "name" then
+			node = R.members[ti] or {k = "Name", s = ti, e = ti}
+			if node.k == "Call" then return nil end -- (the name of a method: its string says where it points)
+		end
+		local path = node and A.ResolvePath(R, node)
+		return path and path.root and path or nil
+	end
+
 	-- Calls worth surfacing: remote fire/invoke, remote listeners, http requests, loadstring.
 	function A.Remotes(R)
 		local out = {}
@@ -2570,8 +2591,8 @@ local function main()
 	end
 
 	----------------------------------------------------------------------------------------------
-	-- Anchors: finding a line again in a newer decompile of the same script, so that notes,
-	-- bookmarks and renames can follow it
+	-- Anchors: finding a line again in a newer decompile of the same script, so that notes
+	-- and renames can follow it
 	----------------------------------------------------------------------------------------------
 
 	-- A line as an anchor sees it: without its indentation, the viewer's notes and the names a decompiler
