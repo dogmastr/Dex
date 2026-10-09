@@ -99,6 +99,17 @@ Everything goes in the executor's workspace folder.
 
 Save Instance and "Save script" write their files next to the `dex` folder. Deleting `dex` is safe: you lose the annotations and your plugins, and everything else is made again.
 
+## What it downloads
+
+| When | What | From |
+|---|---|---|
+| At start | Roblox's version, API dump and class metadata. This is data, and it is kept in `dex/`. | `clientsettings.roblox.com`, `setup.roblox.com` and [Roblox-Client-Tracker](https://github.com/CloneTrooper1019/Roblox-Client-Tracker) |
+| Decompiling with Konstant | Nothing that is run: the script's bytecode is sent to the Konstant server, and its code comes back as text. | `api.plusgiant5.com` |
+| Decompiling with Advanced Decompiler | The decompiler, which is someone else's script: it is **downloaded and run**. | [AZYsGithub/Advanced-Decompiler-V3](https://github.com/AZYsGithub/Advanced-Decompiler-V3) |
+| Save Instance on an executor with no `saveinstance` | USSI, which is someone else's script: it is **downloaded and run**. | [luau/UniversalSynSaveInstance](https://github.com/luau/UniversalSynSaveInstance) |
+
+The two scripts that are run are pinned to a commit, and so is the code they download themselves. What runs is what was there when the pin was set, not what is on those repositories today. The pins are in `main.lua` (`pinnedScript`), so a newer version of either script arrives with a new version of OpenDex.
+
 ## Plugins
 
 A Lua file in `dex/plugins` is loaded when OpenDex starts and gets a tile in its menu. The file returns a table:

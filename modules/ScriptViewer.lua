@@ -934,16 +934,14 @@ local function main()
 			end
 		end
 
-		local function logCall(rec, ...)
+		local function logCall(rec, caller, ...)
 			local n = select("#", ...)
 			local args = {}
 			for i = 1, math.min(n, 6) do
 				args[i] = fmt((select(i, ...)))
 			end
 			if n > 6 then args[#args+1] = "..." end
-			-- ponytail: caller is whatever sits two frames above the hook; approximate on some executors
-			local okInfo, source, line = pcall(debug.info, 3, "sl")
-			local entry = {Time = os.clock() - traceStart, Label = rec.Label, Args = table.concat(args, ", "), Caller = okInfo and source and (tostring(source)..":"..tostring(line)) or "?"}
+			local entry = {Time = os.clock() - traceStart, Label = rec.Label, Args = table.concat(args, ", "), Caller = caller}
 			traceLog[#traceLog+1] = entry
 			if #traceLog > 200 then table.remove(traceLog, 1) end
 			traceSeq = traceSeq + 1
@@ -991,7 +989,11 @@ local function main()
 					end
 					rec.Last = args -- (its page can copy them as code)
 
-					local okLog, logged = pcall(logCall, rec, ...)
+					-- Who called: read here, in the hook. From inside logCall the same level is the pcall around it.
+					-- ponytail: level 3 is pcall, this hook, then the caller; an executor that wraps the hook in a
+					-- C function puts that one there instead ([C]:-1)
+					local okInfo, source, line = pcall(debug.info, 3, "sl")
+					local okLog, logged = pcall(logCall, rec, okInfo and source and (tostring(source)..":"..tostring(line)) or "?", ...)
 					if not okLog then logged = nil end
 					if rec.Break and coroutine.isyieldable() then park(rec, args) end
 					if rec.Edit then
@@ -2554,7 +2556,6 @@ local function main()
 		local file = tab.AnnFile or {v = 1, sets = {}}
 		if type(file.sets) ~= "table" then file.sets = {} end
 		tab.AnnFile = file
-		local empty = #ann.renames == 0 and #ann.comments == 0 and #(ann.lost or {}) == 0
 
 		-- what each note sits on, so that it can follow it into a later decompile
 		if Analysis then
@@ -2562,7 +2563,9 @@ local function main()
 			for _,c in ipairs(ann.comments) do c.a = Analysis.Anchor(lines, c.line - offset) end
 		end
 		ann.off, ann.saved = tab.Offset or 0, os.time()
-		file.sets[tab.Hash] = (not empty) and ann or nil
+		-- (an empty set is kept too: with none for this version, the next visit would carry the notes of an
+		-- older version over again, and deleting them would never hold)
+		file.sets[tab.Hash] = ann
 
 		-- earlier versions stay, to carry notes over from, but not forever
 		local hashes = {}
@@ -3036,7 +3039,7 @@ local function main()
 			Tools.action(1, writesOnly and "Show every use" or "Show only the writes", function() Nav.refsOf(R, ti, tab, not writesOnly) end)
 			local last = eachRow(list, 1, function(n, _, a)
 				local line, col = Analysis.TokenPos(R, a.tok)
-				local row = addNavRow(n, (a.write and "W  " or "R  ")..Analysis.LineText(R, line):match("^%s*(.-)%s*$"):sub(1, 200), function() Nav.go(tab, line, col) end, ":"..line)
+				local row = addNavRow(n, (a.write and "W  " or "R  ")..Analysis.LineText(R, line):sub(1, 200), function() Nav.go(tab, line, col) end, ":"..line)
 				if a.write then row.TextColor3 = Color3.fromRGB(255,190,110) end
 			end, 1000)
 			Tools.moduleUsers(R, ti, last, page, tab.Script) -- and in the other scripts, for a member of a module
@@ -4762,8 +4765,7 @@ local function main()
 			local pos = 1
 			for _ = 2, n do pos = (text:find("\n", pos, true) or #text) + 1 end
 			local stop = text:find("\n", pos, true) or #text + 1
-			local line = text:sub(pos, stop - 1):gsub("\r$", "")
-			return line:match("^%s*(.-)%s*$")
+			return Analysis.Trim(text:sub(pos, stop - 1))
 		end
 
 		----------------------------------------------------------------------------------------------

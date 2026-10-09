@@ -70,7 +70,13 @@ local function main()
 				if not p then return len, false end
 				local ch = byte(src, p)
 				if ch == 92 then
-					j = p + ((byte(src, p + 1) == 13 and byte(src, p + 2) == 10) and 3 or 2)
+					local nx = byte(src, p + 1)
+					if nx == 122 then -- \z: the blanks after it are not part of the string, line breaks too
+						local _, e = find(src, "^%s*", p + 2)
+						j = e + 1
+					else
+						j = p + ((nx == 13 and byte(src, p + 2) == 10) and 3 or 2)
+					end
 				elseif ch == 10 then
 					return p - 1, false
 				else
@@ -117,8 +123,8 @@ local function main()
 		local i = 1
 		while i <= len do
 			local c = byte(src, i)
-			if c == 32 or c == 9 or c == 10 or c == 13 then
-				local _, e = find(src, "^[ \t\r\n]+", i)
+			if c == 32 or (c >= 9 and c <= 13) then -- (a form feed and a vertical tab are blanks too)
+				local _, e = find(src, "^%s+", i)
 				i = e + 1
 			elseif c == 45 and byte(src, i + 1) == 45 then
 				local _, e, eq = find(src, "^%-%-%[(=*)%[", i)
@@ -157,7 +163,9 @@ local function main()
 				if e then
 					local _, ce = find(src, "]" .. eq .. "]", e + 1, true)
 					local last = ce or len
-					push("str", sub(src, e + 1, ce and ce - #eq - 2 or len), i, last)
+					local from = e + 1 -- (a line break right after the opening bracket is not part of the string)
+					if byte(src, from) == 13 and byte(src, from + 1) == 10 then from += 2 elseif byte(src, from) == 10 then from += 1 end
+					push("str", sub(src, from, ce and ce - #eq - 2 or len), i, last)
 					i = last + 1
 				else
 					push("op", "[", i, i)
@@ -200,13 +208,21 @@ local function main()
 		return text
 	end
 
+	-- A text without the blanks at its ends. (Not "^%s*(.-)%s*$": that pattern tries every run of blanks
+	-- inside the text again and again, which takes seconds on a long line with long runs of them.)
+	local function trim(text)
+		local first = text:find("%S")
+		return first and text:match(".*%S", first) or ""
+	end
+	A.Trim = trim
+
 	-- Trimmed text of one source line (1-based).
 	function A.LineText(R, line)
 		local nl = R.nl
 		local from = line == 1 and 1 or (nl[line - 1] and nl[line - 1] + 1)
 		if not from then return "" end
 		local to = (nl[line] or (#R.src + 1)) - 1
-		return (R.src:sub(from, to):match("^%s*(.-)%s*$"))
+		return trim(R.src:sub(from, to))
 	end
 
 	function A.LineStart(R, line)
@@ -325,6 +341,7 @@ local function main()
 		end
 		skipType = function()
 			local function primary()
+				if isop("...") then adv() end -- a variadic: (): ...number
 				if isop("<") then skipBalanced("<", ">") end
 				if isop("(") then
 					skipBalanced("(", ")")
@@ -352,6 +369,7 @@ local function main()
 					err("bad type near '" .. tostring(tv[p]) .. "'")
 				end
 			end
+			if isop("|") or isop("&") then adv() end -- type T = | "a" | "b"
 			primary()
 			while true do
 				if isop("?") or isop("...") then
@@ -407,6 +425,24 @@ local function main()
 		end
 
 		local parseBlock, parseExpr, parseStatement, parseTable
+
+		-- Brackets, blocks and operators inside one another call parseSub and parseBlock inside themselves,
+		-- and some thousands of levels overflow the stack. Luau itself gives up at about a thousand.
+		local depth, MAX_DEPTH = 0, 1000
+		-- True when the code nests too deeply to follow: the rest of the text is given up, with an error.
+		local function tooDeep()
+			if depth < MAX_DEPTH then return false end
+			err("nested too deeply")
+			p = n + 1
+			return true
+		end
+
+		local function skipAttributes() -- @native, @checked, @[a, b]
+			while isop("@") do
+				adv()
+				if isop("[") then skipBalanced("[", "]") elseif tt[p] == "name" then adv() end
+			end
+		end
 
 		local function parseExprList()
 			local list = {parseExpr()}
@@ -555,6 +591,7 @@ local function main()
 		end
 
 		local function parseSimple()
+			skipAttributes() -- (@native function() end)
 			local t, v, s = tt[p], tv[p], p
 			if t == "num" then
 				adv()
@@ -598,6 +635,8 @@ local function main()
 		local function parseSub(limit)
 			local e
 			local t, v = tt[p], tv[p]
+			if tooDeep() then return {k = "Error", s = n + 1, e = n + 1} end
+			depth += 1
 			if (t == "kw" and v == "not") or (t == "op" and (v == "-" or v == "#")) then
 				local s = p
 				adv()
@@ -619,6 +658,7 @@ local function main()
 				local r = parseSub(prio[2])
 				e = {k = "Binop", op = ov, l = e, r = r, s = e.s, e = r.e}
 			end
+			depth -= 1
 			return e
 		end
 		parseExpr = function() return parseSub(0) end
@@ -705,6 +745,10 @@ local function main()
 			loops[#loops + 1] = st
 			adv()
 			local first = expectname()
+			if isop(":") then -- for i: number = 1, 10 / for k: string, v in t
+				adv()
+				skipType()
+			end
 			if isop("=") then
 				st.names = {first}
 				adv()
@@ -723,10 +767,6 @@ local function main()
 			end
 			st.k = "GenFor"
 			local names = {first}
-			if isop(":") then
-				adv()
-				skipType()
-			end
 			while acceptop(",") do
 				names[#names + 1] = expectname()
 				if isop(":") then
@@ -844,7 +884,12 @@ local function main()
 				expectop("=")
 				local values = parseExprList()
 				for i, v in ipairs(values) do
-					if v.k == "Function" and not v.name and targets[i] then v.name = A.Text(R, targets[i].s, targets[i].e, 60) end
+					local target = targets[i]
+					if v.k == "Function" and target then
+						if not v.name then v.name = A.Text(R, target.s, target.e, 60) end
+						-- local f ... f = function: a call of f is found through the local (the first function it is given)
+						if target.k == "Name" and target.sym and not target.sym.fn then target.sym.fn = v end
+					end
 				end
 				for _, t in ipairs(targets) do markWrite(t) end
 				return {k = "Assign", s = s, targets = targets, values = values}
@@ -870,10 +915,7 @@ local function main()
 		end
 
 		parseStatement = function()
-			while isop("@") do -- attributes: @native, @checked, @[a, b]
-				adv()
-				if isop("[") then skipBalanced("[", "]") elseif tt[p] == "name" then adv() end
-			end
+			skipAttributes()
 			local t, v, s = tt[p], tv[p], p
 			if t == "op" and v == ";" then
 				adv()
@@ -914,7 +956,7 @@ local function main()
 			end
 			st = st or parseExprStatement()
 			acceptop(";")
-			st.e = p - 1
+			st.e = math.max(p - 1, st.s) -- (a token that starts no statement is taken as one: nothing was read)
 			st.line1 = tl[st.s]
 			st.line2 = tel[st.e]
 			if simpleStatements[st.k] then
@@ -930,14 +972,18 @@ local function main()
 
 		parseBlock = function()
 			local b = {k = "Block", body = {}, s = p}
-			while not blockEnds() do
-				local before = p
-				local st = parseStatement()
-				if st then b.body[#b.body + 1] = st end
-				if p == before then
-					err("unexpected '" .. tostring(tv[p]) .. "'")
-					adv()
+			if not tooDeep() then
+				depth += 1
+				while not blockEnds() do
+					local before = p
+					local st = parseStatement()
+					if st then b.body[#b.body + 1] = st end
+					if p == before then
+						err("unexpected '" .. tostring(tv[p]) .. "'")
+						adv()
+					end
 				end
+				depth -= 1
 			end
 			b.e = p - 1
 			return b
@@ -2128,6 +2174,10 @@ local function main()
 		local nodes, edges = G.nodes, G.edges
 		local count = #nodes
 		local HGAP, VGAP, MARGIN, LANE = 26, 46, 24, 12
+		if count == 0 then -- (a script whose functions don't call one another: the width below would come out as -infinity)
+			G.w, G.h = 2 * MARGIN, VGAP
+			return G
+		end
 
 		for _, nd in ipairs(nodes) do
 			nd.w, nd.h = measure(nd)
@@ -2687,7 +2737,7 @@ local function main()
 				lineStart = nl + 1
 			end
 			local stop = text:find("\n", s, true)
-			local shown = text:sub(lineStart, (stop or #text + 1) - 1):gsub("\r$", ""):match("^%s*(.-)%s*$")
+			local shown = trim(text:sub(lineStart, (stop or #text + 1) - 1))
 			if #shown > 90 then shown = shown:sub(1, 87) .. "..." end
 			out[#out + 1] = {line = line, col = s - lineStart, len = math.max(e - s + 1, 1), text = shown}
 			init = math.max(e, s) + 1
@@ -3228,9 +3278,11 @@ local function main()
 	local ruleFunctions = {type = true, typeof = true, tostring = true, tonumber = true, select = true}
 	local ruleLibraries = {math = true, string = true, table = true}
 	local ruleTableFunctions = {find = true, concat = true, unpack = true}
-	local ruleBanned = {rep = true, randomseed = true} -- (rep can build a string as big as memory)
+	-- (rep and pack can build a string as big as memory. So can gsub, a level at a time with "%0%0", and it
+	-- calls a function given as the replacement: string.rep would do, and no check sees that call)
+	local ruleBanned = {rep = true, pack = true, gsub = true, randomseed = true}
 	local ruleMethods = {}
-	for name in ("IsA IsDescendantOf IsAncestorOf FindFirstChild FindFirstChildOfClass FindFirstChildWhichIsA FindFirstAncestor FindFirstAncestorOfClass FindFirstAncestorWhichIsA GetFullName GetAttribute lower upper find match sub len format byte gsub split"):gmatch("%a+") do
+	for name in ("IsA IsDescendantOf IsAncestorOf FindFirstChild FindFirstChildOfClass FindFirstChildWhichIsA FindFirstAncestor FindFirstAncestorOfClass FindFirstAncestorWhichIsA GetFullName GetAttribute lower upper find match sub len format byte split"):gmatch("%a+") do
 		ruleMethods[name] = true
 	end
 
@@ -3239,6 +3291,8 @@ local function main()
 		if type(text) ~= "string" or text:match("^%s*$") then return "it is empty" end
 		if #text > 500 then return "it is longer than 500 characters" end
 		if text:find("[\r\n]") then return "it has to be on one line" end
+		-- (the code between the braces of `a {b}` is not parsed, so nothing below would see what it calls)
+		if text:find("`", 1, true) then return "it has a backtick, which a rule from an agent may not" end
 		local ok, R = pcall(A.Analyze, "local args = ...\nreturn " .. text)
 		if not ok then return "it could not be read" end
 		if #R.errors > 0 then return "it is not valid Luau (" .. tostring(R.errors[1].msg) .. ")" end

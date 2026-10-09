@@ -51,7 +51,8 @@ local function main()
 	local tools = {} -- name -> function(args) -> result | nil, why
 	local entries = {} -- what was asked, newest last
 	-- State: off, connecting, connected. Stage says how far the connecting got: off, looking (for the
-	-- relay), norelay, reached (the relay has the token to check), refused, closed, connected. Reason:
+	-- relay), norelay, reached (the relay has the token to check), refused, closed, connected, replaced
+	-- (another OpenDex connected to the relay after this one: this one has stopped trying). Reason:
 	-- why the last try ended.
 	local status = {State = "off", Text = "Off", Stage = "off"}
 	local stats = {Requests = 0, Last = nil}
@@ -687,7 +688,7 @@ local function main()
 
 	-- One connection, from the hello to its end. Returns why it ended, and the stage that is.
 	local function session(ws, my)
-		local closed, refused = false, nil
+		local closed, refused, replaced = false, nil, false
 		local lastPong, lastPing = os.clock(), os.clock()
 		local onMessage, onClose = eventOf(ws, MESSAGE_EVENTS), eventOf(ws, CLOSE_EVENTS)
 		if not onMessage then
@@ -707,6 +708,8 @@ local function main()
 				Main.Notify("The AI relay is connected", "success")
 			elseif msg.type == "error" then
 				refused = tostring(msg.message or "the relay refused the connection")
+			elseif msg.type == "replaced" then
+				replaced = true -- (the relay keeps one OpenDex, and another has just connected to it)
 			end
 		end)
 		if onClose then
@@ -721,7 +724,7 @@ local function main()
 		end)
 		if not sent then closed = true end
 
-		while loopId == my and not closed and not refused do
+		while loopId == my and not closed and not refused and not replaced do
 			task.wait(0.5)
 			local t = os.clock()
 			if t - lastPing >= 20 then
@@ -736,6 +739,7 @@ local function main()
 		for _, connection in ipairs(connections) do pcall(function() connection:Disconnect() end) end
 		if socket == ws then socket = nil end
 		pcall(function() ws:Close() end)
+		if replaced then return "another OpenDex connected to the relay", "replaced" end
 		if status.State == "connected" and loopId == my then Main.Notify("The AI relay disconnected", "info") end
 		return refused or (closed and "the connection closed") or nil, refused and "refused" or "closed"
 	end
@@ -758,6 +762,15 @@ local function main()
 				reason, stage = "the relay is not running", "norelay"
 			end
 			if loopId ~= my then return end
+			if stage == "replaced" then
+				-- Connecting again would push the other OpenDex off the relay, and it this one in turn, for ever
+				-- (two Roblox clients on one executor share the saved switch). So this one stops, as Disconnect
+				-- does, but the saved switch stays on. Connect takes the relay back.
+				loopId = loopId + 1
+				setStatus("off", "Another OpenDex connected to the relay", stage, reason)
+				Main.Notify("Another OpenDex connected to the AI relay, so this one is disconnected. Connect, in the AI window, takes it back.", "warn")
+				return
+			end
 			reason = reason or "the connection ended"
 			setStatus("connecting", ("Not connected: %s (127.0.0.1:%d). Trying again.%s"):format(reason, port, cfg.token == "" and " Paste the relay's token below." or ""), stage, reason)
 			local waited = 0
@@ -788,6 +801,11 @@ local function main()
 		return true
 	end
 
+	-- Whether the switch is on and still acted on (replaced: it is on, but this OpenDex has stopped trying)
+	Agent.On = function()
+		return cfg.enabled and status.Stage ~= "replaced"
+	end
+
 	-- The switch: remembered, and acted on
 	Agent.SetEnabled = function(on)
 		cfg.enabled = on and true or false
@@ -799,7 +817,7 @@ local function main()
 
 	-- A change of port or token while connected: connect again with it
 	local function reconnect()
-		if cfg.enabled then Agent.Start() end
+		if Agent.On() then Agent.Start() end
 	end
 
 	local function loadConfig()
@@ -926,9 +944,9 @@ local function main()
 		detail.Name, detail.TextSize = "Detail", 13
 		Lib.Tooltip.attach(detail, function() return detail.Text end)
 		local connect = button(content, "", function()
-			return Agent.Unavailable() or (cfg.enabled and "Stops the AI in your editor from reaching OpenDex" or "Connects to the relay program on this PC. It is remembered between sessions.")
+			return Agent.Unavailable() or (Agent.On() and "Stops the AI in your editor from reaching OpenDex" or "Connects to the relay program on this PC. It is remembered between sessions.")
 		end, UDim2.new(1, -98, 0, 9), UDim2.new(0, 90, 0, 24), function()
-			local ok, why = Agent.SetEnabled(not cfg.enabled)
+			local ok, why = Agent.SetEnabled(not Agent.On())
 			if not ok then Main.Notify(why, "warn") end
 			render()
 		end)
@@ -1204,7 +1222,7 @@ local function main()
 			local start = "On this PC, open a terminal in the mcp folder of OpenDex (it is on GitHub: dogmastr/OpenDex) and run: python opendex_mcp.py. Leave it open."
 			if stage == "norelay" then
 				paint(1, "problem", "Nothing answers on "..at..". "..start.." If the relay uses another port, set it under Options.")
-			elseif stage == "reached" or stage == "refused" or stage == "connected" then
+			elseif stage == "reached" or stage == "refused" or stage == "connected" or stage == "replaced" then
 				paint(1, "done", "It answers on "..at..".")
 			else
 				paint(1, stage == "off" and "todo" or "busy", start)
@@ -1216,6 +1234,8 @@ local function main()
 				paint(2, "problem", "The relay refused this token. Paste the one it printed when it started (it is also in the file mcp/.token).")
 			elseif stage == "reached" then
 				paint(2, "busy", "The relay is checking the token.")
+			elseif stage == "replaced" then
+				paint(2, "problem", "Another OpenDex connected to the relay after this one, and the relay keeps one. Press Connect, at the top, to take it back.")
 			else
 				paint(2, "todo", "The relay prints a token when it starts. Paste it here, then press Connect, at the top.")
 			end
@@ -1234,7 +1254,7 @@ local function main()
 		----------------------------------------------------------------------------------------------
 
 		local HEADLINES = {off = "Off", looking = "Looking for the relay", norelay = "The relay is not running", reached = "Checking the token",
-			refused = "The relay refused the token", closed = "The connection closed", connected = "Connected"}
+			refused = "The relay refused the token", closed = "The connection closed", connected = "Connected", replaced = "Another OpenDex took over"}
 		local COLORS = {off = theme.ReadOnlyText, norelay = theme.Danger, refused = theme.Danger, connected = theme.Success} -- (the others are on their way: amber)
 
 		-- The line under the state: what to do about it, or what the AI is doing
@@ -1253,6 +1273,8 @@ local function main()
 				return "Start it: Set up has the steps. Trying again."
 			elseif stage == "refused" then
 				return "Paste the relay's token in step 2 of Set up."
+			elseif stage == "replaced" then
+				return "It connected to the relay after this one. Connect takes the relay back."
 			elseif stage == "closed" then
 				local reason = status.Reason
 				return ((reason and reason ~= "the connection closed") and (reason:sub(1, 1):upper()..reason:sub(2)..". ") or "").."Trying again."
@@ -1266,7 +1288,7 @@ local function main()
 			dot.BackgroundColor3 = COLORS[stage] or theme.Warning
 			headline.Text = (why and stage == "off" and "Not available here") or HEADLINES[stage] or status.Text
 			detail.Text = statusLine()
-			connect.Text = cfg.enabled and "Disconnect" or "Connect"
+			connect.Text = Agent.On() and "Disconnect" or "Connect"
 			connect:SetDisabled(why ~= nil)
 			for name, btn in pairs(tabs) do
 				btn.Text = (name == "Activity" and #entries > 0) and ("Activity "..#entries) or name
@@ -1290,8 +1312,8 @@ local function main()
 		Main.AddCommands(function()
 			local why = Agent.Unavailable()
 			local commands = {
-				{Name = cfg.enabled and "AI: disconnect from the relay" or "AI: connect to the relay", Category = "AI", Disabled = why or false, Run = function()
-					Agent.SetEnabled(not cfg.enabled)
+				{Name = Agent.On() and "AI: disconnect from the relay" or "AI: connect to the relay", Category = "AI", Disabled = why or false, Run = function()
+					Agent.SetEnabled(not Agent.On())
 					render()
 				end},
 			}

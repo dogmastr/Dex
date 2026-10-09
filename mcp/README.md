@@ -71,9 +71,9 @@ The AI window's **Activity** page lists every request, the newest at the top, wi
 
 ## Options
 
-`python opendex_mcp.py --port 38211 --token TOKEN`. The port can also come from `OPENDEX_PORT`, the token from `OPENDEX_TOKEN`. Use the same port in OpenDex's AI window.
+`python opendex_mcp.py --port 38211 --token TOKEN`. The port can also come from `OPENDEX_PORT`, the token from `OPENDEX_TOKEN`. Use the same port in OpenDex's AI window (a number from 1024 to 65535). A token of your own has to be plain ASCII text.
 
-The relay listens on 127.0.0.1 only, refuses requests that carry an `Origin` header (a web page), and needs the token from the editor and from the game. One OpenDex at a time: a newer one replaces the older.
+The relay listens on 127.0.0.1 only, refuses requests that carry an `Origin` header (a web page), and needs the token from the editor and from the game. One OpenDex at a time: a newer one replaces the older, which then stops trying until you press Connect in it.
 
 ## When it does not work
 
@@ -83,6 +83,7 @@ The relay listens on 127.0.0.1 only, refuses requests that carry an `Origin` hea
 - **Another editor shows `opendex` as failed, or asks you to sign in:** the relay is not running, or the token in that editor's file is not the relay's. The relay prints every editor's text, with the token, when it starts.
 - **The AI window says "The relay is not running":** start it, or check the port (under Options on the Set up page). OpenDex tries again every few seconds.
 - **The AI window says the relay refused the token:** paste the token the relay printed (or the one in `.token`).
+- **The AI window says "Another OpenDex took over":** OpenDex in another Roblox window connected to the relay after this one, and the relay keeps one. Press Connect in the window the AI should work in.
 - **Tools answer "OpenDex is not connected":** the relay is up but OpenDex is not connected to it: open the AI window and press Connect.
 - **A tool takes long:** the first read of a big script decompiles it. The relay waits up to two minutes.
 - **A tool says its answer is from the scripts read so far:** `search`, `remote_map`, `usage`, `changes` and the filters of `scripts` need every script decompiled, which starts by itself and can take a while in a big game (the Script Viewer's status bar shows it). The AI asks again, or you tell it to.

@@ -222,6 +222,12 @@ async def game_session(reader, writer, headers):
     game = refused
     old, state["game"] = state["game"], game
     if old is not None:
+        # The older one is told why, so that it stops: two that each connect again would push each other
+        # off for ever (two Roblox clients on one executor both have the switch on).
+        try:
+            await asyncio.wait_for(old.send({"type": "replaced"}), 5)
+        except Exception:
+            pass
         await old.close("replaced by a newer OpenDex")
     log("OpenDex connected (%s, OpenDex %s, place %s)" % (hello.get("executor", "?"), hello.get("version", "?"), hello.get("place", "?")))
     try:
@@ -315,7 +321,7 @@ class RpcError(Exception):
 
 async def tool_call(params):
     name, args = params.get("name"), params.get("arguments")
-    spec = TOOLS.get(name)
+    spec = TOOLS.get(name) if isinstance(name, str) else None  # (a list or an object cannot be looked up at all)
     if spec is None:
         raise RpcError(-32602, "Unknown tool: %s" % name)
     if args is None:
@@ -476,17 +482,18 @@ async def read_request(reader):
             raise ValueError("body too large")
         body = await reader.readexactly(size)
     elif headers.get("transfer-encoding", "").lower() == "chunked":
-        chunks = []
+        chunks, total = [], 0
         while True:
             size = int((await reader.readline()).split(b";")[0].strip() or b"0", 16)
             if size == 0:
                 while (await reader.readline()) not in (b"\r\n", b"\n", b""):
                     pass
                 break
+            total += size  # counted before the chunk is read: a chunk can say it is as large as it likes
+            if total > MAX_BODY:
+                raise ValueError("body too large")
             chunks.append(await reader.readexactly(size))
             await reader.readline()
-            if sum(map(len, chunks)) > MAX_BODY:
-                raise ValueError("body too large")
         body = b"".join(chunks)
     return parts[0].upper(), parts[1], headers, body
 
@@ -582,11 +589,15 @@ def load_token(given):
         return os.environ["OPENDEX_TOKEN"]
     path = HERE / ".token"
     try:
-        saved = path.read_text(encoding="utf-8").strip()
+        # (saved by a Windows tool it can start with a byte order mark, and PowerShell's > writes UTF-16)
+        raw = path.read_bytes()
+        saved = raw.decode("utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig").strip()
         if saved:
             return saved
     except OSError:
         pass
+    except UnicodeError:
+        print("The saved token (%s) is not text that can be read: a new one is made." % path)
     token = secrets.token_urlsafe(18)
     try:
         path.write_text(token + "\n", encoding="utf-8")
@@ -610,23 +621,61 @@ def banner():
     print("Waiting for OpenDex... (Ctrl+C to stop)", flush=True)
 
 
-async def serve():
+async def listen():
     try:
-        server = await asyncio.start_server(handle, "127.0.0.1", PORT)
+        return await asyncio.start_server(handle, "127.0.0.1", PORT)
     except OSError as error:
         sys.exit("Could not listen on 127.0.0.1:%d (%s). Is the relay already running? Use --port for another port." % (PORT, error))
+
+
+def loop_error(loop, context):
+    # WinError 64 is a connection that was reset before it was accepted. asyncio reports it twice, with
+    # a traceback each time; serve() says it in a line, and listens again.
+    if getattr(context.get("exception"), "winerror", None) != 64:
+        loop.default_exception_handler(context)
+
+
+async def serve():
+    server = await listen()
     banner()
-    async with server:
-        await server.serve_forever()
+    asyncio.get_running_loop().set_exception_handler(loop_error)
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            # Windows: when a client resets its connection before it is accepted, asyncio reports "Accept failed
+            # on a socket" and closes the listening socket. The relay would run on without listening.
+            if any(sock.fileno() == -1 for sock in server.sockets):
+                server.close()
+                server = await listen()
+                log("the listening socket was lost (a client reset its connection); listening again")
+    finally:
+        server.close()
+
+
+def port_number(text):
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1024 <= port <= 65535:  # (the range OpenDex's AI window takes)
+        raise argparse.ArgumentTypeError("%r is not a port: it has to be a number from 1024 to 65535" % text)
+    return port
 
 
 def main():
     global TOKEN, PORT
+    for stream in (sys.stdout, sys.stderr):  # (a name from the game that the console cannot show must not stop a call)
+        try:
+            stream.reconfigure(errors="replace")
+        except Exception:
+            pass
     parser = argparse.ArgumentParser(description="Relay between MCP clients (Claude Code, VS Code) and OpenDex.")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("OPENDEX_PORT", "38211")), help="port on 127.0.0.1 (default 38211)")
+    parser.add_argument("--port", type=port_number, default=os.environ.get("OPENDEX_PORT", "38211"), help="port on 127.0.0.1 (default 38211)")
     parser.add_argument("--token", help="the token clients must send (default: $OPENDEX_TOKEN, or one kept in .token next to this file)")
     options = parser.parse_args()
-    PORT, TOKEN = options.port, load_token(options.token)
+    PORT, TOKEN = options.port, load_token(options.token).strip()
+    if not (TOKEN and TOKEN.isascii() and TOKEN.isprintable()):
+        sys.exit("The token has to be plain text (ASCII letters, digits and signs): an editor sends it in an HTTP header.")
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:

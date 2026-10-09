@@ -2364,7 +2364,7 @@ local function main()
 				{7,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Close",Parent={5},Position=UDim2.new(1,-20,0,0),Size=UDim2.new(0,20,0,20),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
 				{8,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5054663650",Parent={7},Position=UDim2.new(0,5,0,5),Size=UDim2.new(0,10,0,10),}},
 				{9,"UICorner",{CornerRadius=UDim.new(0,4),Parent={7},}},
-				--[[lol mod]]	{9,"UICorner",{CornerRadius=UDim.new(0,4),Parent={2},}},
+				--[[lol mod]]	{23,"UICorner",{CornerRadius=UDim.new(0,4),Parent={2},}},
 				{10,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.12549020349979,0.12549020349979,0.12549020349979),BackgroundTransparency=1,BorderSizePixel=0,Font=3,Name="Minimize",Parent={5},Position=UDim2.new(1,-40,0,0),Size=UDim2.new(0,20,0,20),Text="",TextColor3=Color3.new(1,1,1),TextSize=14,}},
 				{11,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://5034768003",Parent={10},Position=UDim2.new(0,5,0,5),Size=UDim2.new(0,10,0,10),}},
 				{12,"UICorner",{CornerRadius=UDim.new(0,4),Parent={10},}},
@@ -3505,6 +3505,7 @@ local function main()
 
 		funcs.Clear = function(self)
 			self.Items = {}
+			self.QueuedDivider = false -- (one queued with nothing after it belongs to the menu that is gone)
 			self.Updated = nil
 		end
 
@@ -3583,20 +3584,21 @@ local function main()
 						if item.Submenu then
 							newEntry.MouseButton1Click:Connect(function() self:ShowSubmenu(item,newEntry) end)
 						elseif item.OnClick then
+							-- hidden first: an action can wait (a Save As window) or fail, and the menu must not stay up for that
 							newEntry.MouseButton1Click:Connect(function()
-								item.OnClick(item.Name)
 								if not item.NoHide then
 									self:Hide()
 								end
+								item.OnClick(item.Name)
 							end)
 						end
 
 						if item.OnRightClick then
 							newEntry.MouseButton2Click:Connect(function()
-								item.OnRightClick(item.Name)
 								if not item.NoHide then
 									self:Hide()
 								end
+								item.OnRightClick(item.Name)
 							end)
 						end
 					end
@@ -3718,8 +3720,8 @@ local function main()
 						Reason = sub.Reason,
 						Tooltip = sub.Tooltip,
 						OnClick = function(...)
-							if sub.OnClick then sub.OnClick(...) end
 							self:Hide()
+							if sub.OnClick then sub.OnClick(...) end
 						end,
 					})
 				end

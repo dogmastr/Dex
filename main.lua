@@ -452,12 +452,31 @@ Main = (function()
 		env.makefolder = makefolder
 		env.listfiles = listfiles
 		env.delfile = delfile
+		-- Two scripts of other people are downloaded and run, each when it is first needed: UniversalSynSaveInstance
+		-- and Advanced Decompiler. Each is pinned to a commit, and so is the code it downloads itself: where its
+		-- text names a branch, that is rewritten to a commit (rewrites: {the text it has, what it becomes}). What
+		-- runs is then what was there when the pins were set, whatever is pushed to those repositories later.
+		-- To move a pin: change the hashes here, and check that the script's text still has each first text.
+		local function pinnedScript(url, rewrites)
+			local source = oldgame:HttpGet(url, true)
+			for _, pair in ipairs(rewrites) do
+				local found
+				source, found = source:gsub((pair[1]:gsub("%p", "%%%0")), pair[2])
+				if found == 0 then error("its text is not the pinned one ('"..pair[1].."' is not in it)", 0) end
+			end
+			return source
+		end
+
 		-- An executor with no saveinstance of its own gets UniversalSynSaveInstance. It is downloaded the first
 		-- time something is saved, and kept on Main so that a reload does not fetch it again.
 		env.saveinstance = saveinstance or function(obj, filepath, options)
 			if not Main.SynSaveInstance then
 				local ok, saver = pcall(function()
-					return loadstring(oldgame:HttpGet("https://raw.githubusercontent.com/luau/SynSaveInstance/main/saveinstance.luau", true), "saveinstance")()
+					return loadstring(pinnedScript("https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/089986506e7ab9c50d7065d48b36e3bfbd5f78d7/saveinstance.luau", {
+						{"luau/SomeHub/main/", "luau/SomeHub/beabe12be11b007777cfef0bffbe68dfb3f8b3b9/"}, -- its stream buffer and method finder
+						{"daily3014/rbx-algorithms/refs/heads/main/", "daily3014/rbx-algorithms/468dde82bdba89176157dcec90ba503b7046f5b3/"}, -- Base64
+						{"RiskoZS/llz4/refs/heads/main/", "RiskoZS/llz4/57d869215b7a061121f5492ecff245989638816a/"}, -- LZ4
+					}), "saveinstance")()
 				end)
 				if not ok or type(saver) ~= "function" then
 					error("the saver (UniversalSynSaveInstance) could not be downloaded: "..tostring(saver), 0)
@@ -531,7 +550,9 @@ Main = (function()
 			if not Main.AdvancedDecompiler and (not adTriedAt or os.clock() - adTriedAt > 30) then
 				adTriedAt = os.clock()
 				local ok, result = pcall(function()
-					return loadstring(game:HttpGet("https://raw.githubusercontent.com/AZYsGithub/Advanced-Decompiler-V3/refs/heads/main/init.lua"))()
+					return loadstring(pinnedScript("https://raw.githubusercontent.com/AZYsGithub/Advanced-Decompiler-V3/988db423f6f63a54fd6919d7e7fef9de45c182b0/init.lua", {
+						{'BASE_BRANCH = "main"', 'BASE_BRANCH = "988db423f6f63a54fd6919d7e7fef9de45c182b0"'}, -- its four modules, from the same commit
+					}))()
 				end)
 				if ok and type(result) == "function" then Main.AdvancedDecompiler = result end
 			end
@@ -674,6 +695,9 @@ Main = (function()
 		local syntax = Settings.Theme.Syntax
 		if close(syntax.Comment, Color3.fromRGB(102,102,102)) then syntax.Comment = Color3.fromRGB(140,140,140) end -- comments were 2.7:1
 		if Settings.Window.Transparency == 0.2 then Settings.Window.Transparency = 0 end -- windows used to be see-through
+		-- done once: the next save says so. (The file's own number was loaded over the default, and a value
+		-- set back to an old default on purpose would be moved again at every start.)
+		Settings.SettingsVersion = DefaultSettings.SettingsVersion
 	end
 
 	Main.LoadSettings = function()

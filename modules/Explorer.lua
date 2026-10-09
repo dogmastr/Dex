@@ -1096,16 +1096,34 @@ local function main()
 	end
 
 	-- Clone that also works on objects with Archivable off (characters, most things made at run time),
-	-- for which Clone() gives nil. nil if the object really can't be cloned.
+	-- for which Clone() gives nil, and that keeps what is inside them with it off (Clone() leaves those
+	-- out without a word). nil if the object really can't be cloned.
 	local function cloneAny(inst)
-		local ok,cloned = pcall(function()
-			local was = inst.Archivable
-			inst.Archivable = true
-			local done,copy = pcall(inst.Clone,inst)
-			inst.Archivable = was -- put back whether or not the clone worked
-			return done and copy or nil
-		end)
-		return ok and cloned or nil
+		local off = {} -- what had Archivable off, to put it back
+		local function archive(obj)
+			if not obj.Archivable then
+				obj.Archivable = true
+				off[#off+1] = obj
+			end
+		end
+		pcall(archive,inst)
+		local ok,descs = pcall(getDescendants,inst)
+		for _,obj in ipairs(ok and descs or {}) do pcall(archive,obj) end
+
+		local done,copy = pcall(inst.Clone,inst)
+		for _,obj in ipairs(off) do pcall(function() obj.Archivable = false end) end -- whether or not the clone worked
+		return done and copy or nil
+	end
+
+	-- The selected nodes that are not inside another selected one: a copy of that one already holds them
+	local function outermost()
+		local map,out = selection.Map,{}
+		for _,node in ipairs(selection.List) do
+			local par = node.Parent
+			while par and not map[par] do par = par.Parent end
+			if not par then out[#out+1] = node end
+		end
+		return out
 	end
 
 	Explorer.InitRightClick = function()
@@ -1113,7 +1131,7 @@ local function main()
 
 		context:Register("CUT",{Name = "Cut", IconMap = Explorer.MiscIcons, Icon = "Cut", DisabledIcon = "Cut_Disabled", OnClick = function()
 			local destroy = game.Destroy
-			local sList,newClipboard = selection.List,{}
+			local sList,newClipboard = outermost(),{}
 			local count = 1
 			for i = 1,#sList do
 				local inst = sList[i].Obj
@@ -1132,7 +1150,7 @@ local function main()
 		end})
 
 		context:Register("COPY",{Name = "Copy", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", OnClick = function()
-			local sList,newClipboard = selection.List,{}
+			local sList,newClipboard = outermost(),{}
 			local count = 1
 			for i = 1,#sList do
 				local cloned = cloneAny(sList[i].Obj)
@@ -1163,7 +1181,7 @@ local function main()
 		end})
 
 		context:Register("DUPLICATE",{Name = "Duplicate", IconMap = Explorer.MiscIcons, Icon = "Copy", DisabledIcon = "Copy_Disabled", OnClick = function()
-			local sList = selection.List
+			local sList = outermost()
 			local newSelection = {}
 			for i = 1,#sList do
 				local node = sList[i]
@@ -1220,31 +1238,22 @@ local function main()
 
 		context:Register("UNGROUP",{Name = "Ungroup", IconMap = Explorer.MiscIcons, Icon = "Ungroup", DisabledIcon = "Ungroup_Disabled", OnClick = function()
 			local newSelection = {}
-			local count = 1
 
-			local function ungroup(node)
-				local par = node.Parent.Obj
-				local ch = {}
-				local chCount = 1
-
-				for i = 1,#node do
-					local n = node[i]
-					newSelection[count] = n
-					ch[chCount] = n
-					count = count + 1
-					chCount = chCount + 1
+			-- Parent and children are read from the instance: with deferred signals the node tree still
+			-- shows what was there before the ungroup just made (a model and a model inside it, both selected)
+			local function ungroup(obj)
+				local par = obj.Parent
+				for _,child in ipairs(obj:GetChildren()) do
+					pcall(function() child.Parent = par end)
+					newSelection[#newSelection+1] = nodeNow(child)
 				end
-
-				for i = 1,#ch do
-					pcall(function() ch[i].Obj.Parent = par end)
-				end
-
-				node.Obj:Destroy()
+				pcall(obj.Destroy,obj)
 			end
 
 			for i,v in next,selection.List do
-				if isa(v.Obj,"Model") then
-					ungroup(v)
+				-- (Workspace is a Model too: ungrouping it would empty it into game)
+				if isa(v.Obj,"Model") and not isa(v.Obj,"Workspace") then
+					ungroup(v.Obj)
 				end
 			end
 
@@ -1393,16 +1402,15 @@ local function main()
 				env.setclipboard(Explorer.GetInstancePath(sList[1].Obj))
 			elseif #sList > 1 then
 				local resList = {"{"}
-				local count = 2
+				local finder -- a nil instance's path starts with the function that finds it: written once, above the table
 				for i = 1,#sList do
-					local path = "\t"..Explorer.GetInstancePath(sList[i].Obj)..","
-					if #path > 0 then
-						resList[count] = path
-						count = count+1
-					end
+					local path = Explorer.GetInstancePath(sList[i].Obj)
+					local head,rest = path:match("^(local getNil = .-)\n\n(.*)$")
+					if head then finder,path = head,rest end
+					resList[#resList+1] = "\t"..path..","
 				end
-				resList[count] = "}"
-				env.setclipboard(table.concat(resList,"\n"))
+				resList[#resList+1] = "}"
+				env.setclipboard((finder and finder.."\n\n" or "")..table.concat(resList,"\n"))
 			end
 		end})
 
@@ -1490,12 +1498,19 @@ local function main()
 				end
 			end
 		end, OnRightClick = function()
-			workspace.CurrentCamera.CameraSubject = plr.Character
+			-- the Humanoid, as the game's own camera has it (the Model alone gives no head offset)
+			local char = plr.Character
+			workspace.CurrentCamera.CameraSubject = char and char:FindFirstChildOfClass("Humanoid") or char
 		end})
 
 		context:Register("VIEW_SCRIPT",{Name = "View Script", IconMap = Explorer.MiscIcons, Icon = "ViewScript", DisabledIcon = "Empty", OnClick = function()
-			local scr = selection.List[1] and selection.List[1].Obj
-			if scr then ScriptViewer.ViewScript(scr) end
+			-- the first script among what is selected (a folder can be selected along with it)
+			for _,node in ipairs(selection.List) do
+				if env.isViableDecompileScript(node.Obj) then
+					ScriptViewer.ViewScript(node.Obj)
+					break
+				end
+			end
 		end})
 
 		context:Register("FIRE_TOUCHTRANSMITTER",{Name = "Fire TouchTransmitter", OnClick = function()
@@ -1564,7 +1579,7 @@ local function main()
 				local node = sList[i]
 				local Obj = node.Obj
 				if Obj:IsA("Player") and Obj.Character then
-					workspace.CurrentCamera.CameraSubject = Obj.Character
+					workspace.CurrentCamera.CameraSubject = Obj.Character:FindFirstChildOfClass("Humanoid") or Obj.Character
 					break
 				end
 			end
@@ -1598,14 +1613,19 @@ local function main()
 		Explorer.RightClickContext = context
 	end
 
-	Explorer.HideNilInstances = function()
-		table.clear(nilMap)
-
+	-- The connections to the nil instances are not on Main's list (Main.Track), so a reload of OpenDex
+	-- drops them here: they would keep the old run's tree alive and writing into nodes
+	Explorer.Unload = function()
 		for i,v in next,nilCons do
 			v[1]:Disconnect()
 			v[2]:Disconnect()
 		end
 		table.clear(nilCons)
+	end
+
+	Explorer.HideNilInstances = function()
+		table.clear(nilMap)
+		Explorer.Unload()
 
 		for i = 1,#nilNode do
 			coroutine.wrap(removeObject)(nilNode[i].Obj)
@@ -1681,6 +1701,11 @@ local function main()
 					indexName = ":GetChildren()["..fcInd.."]"
 				elseif (parObj == game or parObj == rawGame) and API.Classes[className] and API.Classes[className].Tags.Service then
 					indexName = ':GetService("'..className..'")'
+				elseif fc then
+					-- a member of the parent wins over a child of the same name: folder.Destroy is the method,
+					-- card.Name the text "Card"
+					local ok,got = pcall(function() return parObj[curName] end)
+					if not (ok and got == fc) then indexName = ':FindFirstChild("'..formatLuaString(curName)..'")' end
 				end
 			elseif parObj == nil then
 				local getnil = "local getNil = function(name, class) for _, v in next, getnilinstances() do if v.ClassName == class and v.Name == name then return v end end end"
